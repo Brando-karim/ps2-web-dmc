@@ -182,6 +182,18 @@ std::vector<std::uint32_t> computed_branches(const Image &image, const Program &
     return found;
 }
 
+std::vector<std::uint32_t> frame_starts(const Image &image, std::uint32_t begin, std::uint32_t end) {
+    std::vector<std::uint32_t> found;
+    for (std::uint32_t pc = begin + 8; pc < end; pc += 4) {
+        const std::uint32_t w = image.word(pc).value_or(0);
+        if ((w & 0xFFFF8000u) != 0x27BD8000u && (w & 0xFFFF8000u) != 0x67BD8000u) continue;
+        std::uint32_t at = pc - 4;
+        while (at > begin + 4 && pc - at < 20 && image.word(at).value_or(1) == 0) at -= 4;
+        if (image.word(at).value_or(0) == 0x03E00008u || image.word(at - 4).value_or(0) == 0x03E00008u) found.push_back(pc);
+    }
+    return found;
+}
+
 }
 
 Program analyse(const Image &image, const std::vector<std::uint32_t> &extra_entries, const std::set<std::uint32_t> &dynamic) {
@@ -218,6 +230,8 @@ Program analyse(const Image &image, const std::vector<std::uint32_t> &extra_entr
         std::vector<std::uint32_t> candidates = address_constants(image, p);
         const std::vector<std::uint32_t> branches = computed_branches(image, p);
         candidates.insert(candidates.end(), branches.begin(), branches.end());
+        const std::vector<std::uint32_t> frames = frame_starts(image, text_begin, text_end);
+        candidates.insert(candidates.end(), frames.begin(), frames.end());
         for (const auto &segment : image.segments())
             for (std::size_t offset = 0; offset + 4 <= segment.bytes.size(); offset += 4)
                 candidates.push_back(*image.word(segment.address + static_cast<std::uint32_t>(offset)));
