@@ -264,11 +264,13 @@ bool g_fileio_async = false;
 std::uint32_t g_fileio_result = 0;
 char g_loadfile_version[4] = {'3', '0', '0', '0'};
 
-void read_loadfile_version(const std::string &image_path) {
+void read_reboot_image(const std::string &image_path) {
     const auto entry = disc::find(image_path);
     if (!entry || entry->directory) return;
     std::vector<std::uint8_t> image((entry->size + disc::kSector - 1) / disc::kSector * disc::kSector);
     if (image.empty() || !disc::read(entry->sector, static_cast<std::uint32_t>(image.size() / disc::kSector), image.data())) return;
+    for (std::size_t at = 0; at + 16 <= image.size() && image[at]; at += 16)
+        if (std::memcmp(&image[at], "FILEIO\0", 7) == 0) g_fileio_async = true;
     static const char kTag[] = "PsIIloadfile";
     const auto it = std::search(image.begin(), image.end(), kTag, kTag + sizeof kTag - 1);
     if (image.end() - it < static_cast<std::ptrdiff_t>(sizeof kTag + 3)) return;
@@ -283,7 +285,7 @@ void reboot(std::uint32_t src) {
     const std::string path(reinterpret_cast<const char *>(packet + 24), strnlen(reinterpret_cast<const char *>(packet + 24), std::min<std::uint32_t>(args_size, 80)));
     std::fprintf(stderr, "[sif] IOP reboot requested with \"%s\"\n", path.c_str());
     if (path.find("IOPRP") != std::string::npos) g_fileio_async = true;
-    if (const auto space = path.find(' '); space != std::string::npos) read_loadfile_version(path.substr(space + 1));
+    if (const auto space = path.find(' '); space != std::string::npos) read_reboot_image(path.substr(space + 1));
 }
 
 std::uint32_t arg(const iop::Cpu &c, int i) { return i < 4 ? c.r[4 + i] : iop::read32(c.r[29] + 16u + static_cast<std::uint32_t>(i - 4) * 4u); }
@@ -524,7 +526,7 @@ bool fileio_async(std::uint32_t method, std::uint32_t args, std::uint32_t, std::
     case 23: {
         const std::string device = text(12);
         const std::uint32_t cmd = word(12 + 0x800), out = word(12 + 0x808) & (kRamSize - 1);
-        std::uint32_t result = 0;
+        const std::uint32_t result = device.starts_with("cdrom") ? 0u : static_cast<std::uint32_t>(-19);
         if (cmd == 0x4322u) store<std::uint32_t>(g_ram + out, 0x0Au);
         else if (cmd == 0x4325u) store<std::uint32_t>(g_ram + out, 2u);
         else if (cmd == 0x4320u) store<std::uint32_t>(g_ram + out, 0u);
