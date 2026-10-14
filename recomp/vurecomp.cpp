@@ -552,7 +552,11 @@ std::string generate(const Program &p, std::string &name) {
         if (in.count(prev)) {
             const Lower &pl = lowers[prev];
             const std::uint32_t phi = word(p.code, prev + 4);
-            if (phi & 0x40000000u) o += std::format("    if (ending) {{ r.tpc = {}u; return; }}\n", (pc + 8u) & kMask);
+            if (phi & 0x40000000u) {
+                const std::string after = std::format("{}u", (pc + 8u) & kMask);
+                const std::string tpc = pl.branch ? std::format("pend ? {}u : {}", pl.target & kMask, after) : pl.jump ? "pendj ? jpc : " + after : after;
+                o += std::format("    if (ending) {{ r.tpc = {}; return; }}\n", tpc);
+            }
             if (pl.branch) o += std::format("    if (pend) {{ pend = false; goto {}; }}\n", label(pl.target));
             if (pl.jump) o += "    if (pendj) { pendj = false; goto dispatch; }\n";
         }

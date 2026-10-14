@@ -161,7 +161,7 @@ struct Code : Out {
 };
 
 enum : std::uint8_t {
-    kOpDrop = 0x1A, kOpEqz = 0x45, kOpEq = 0x46, kOpNe = 0x47, kOpLtS = 0x48, kOpGtS = 0x4A, kOpLeS = 0x4C, kOpGeS = 0x4E,
+    kOpDrop = 0x1A, kOpSelect = 0x1B, kOpEqz = 0x45, kOpEq = 0x46, kOpNe = 0x47, kOpLtS = 0x48, kOpGtS = 0x4A, kOpLeS = 0x4C, kOpGeS = 0x4E,
     kOpAdd = 0x6A, kOpSub = 0x6B, kOpMul = 0x6C, kOpAnd = 0x71, kOpOr = 0x72, kOpXor = 0x73, kOpShl = 0x74, kOpShrU = 0x76, kOpExt16 = 0xC1,
     kOpReturn = 0x0F, kOpBr = 0x0C, kOpUnreachable = 0x00,
 };
@@ -1366,7 +1366,15 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
                 c_.get(kEnding);
                 c_.open_if();
                 c_.get(kR);
-                c_.i32c((pc + 8u) & kMask);
+                if (pl.branch || pl.jump) {
+                    if (pl.branch) c_.i32c(pl.target & kMask);
+                    else c_.get(kJpc);
+                    c_.i32c((pc + 8u) & kMask);
+                    c_.get(pl.branch ? kPend : kPendj);
+                    c_.op(kOpSelect);
+                } else {
+                    c_.i32c((pc + 8u) & kMask);
+                }
                 c_.store(kOffTpc);
                 c_.op(kOpReturn);
                 c_.end();
