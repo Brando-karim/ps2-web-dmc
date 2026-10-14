@@ -89,8 +89,8 @@ std::uint32_t g_vsync_flag = 0, g_vsync_data = 0;
 std::uint32_t g_osd_config = 0;
 
 template <typename Map>
-int lowest_free(const Map &map, int limit) {
-    for (int id = 1; id < limit; ++id)
+int lowest_free(const Map &map, int limit, int first = 1) {
+    for (int id = first; id < limit; ++id)
         if (!map.count(id)) return id;
     return -1;
 }
@@ -644,7 +644,7 @@ void handle_syscall(Cpu &c, std::uint32_t pc) {
         s.attr = ld32(p + 16);
         s.option = ld32(p + 20);
         s.count = s.init;
-        const int id = lowest_free(g_semas, 256);
+        const int id = lowest_free(g_semas, 256, 0);
         if (id < 0) { ret(c, -1); break; }
         g_semas[id] = s;
         ret(c, id);
