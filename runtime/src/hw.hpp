@@ -21,7 +21,7 @@ std::uint32_t physical(std::uint32_t a);
 namespace hw {
 
 void state(ps2::state::Stream &s);
-std::function<void()> event_action(int id);
+std::function<void()> event_action(int id, std::uint64_t at);
 
 enum Event {
     kEventVblank,

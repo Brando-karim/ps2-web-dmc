@@ -60,6 +60,7 @@ std::uint64_t now();
 std::uint64_t hblank_cycles();
 void set_budget(Cpu &c, std::int64_t cycles);
 void schedule(int event, std::uint64_t at, std::function<void()> action);
+std::uint64_t scheduled_at(int event);
 bool preempt(Cpu &c);
 
 bool has_code(std::uint32_t pc);

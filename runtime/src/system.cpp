@@ -193,6 +193,12 @@ void schedule(int event, std::uint64_t at, std::function<void()> action) {
     g_events.push_back({event, at, std::move(action)});
 }
 
+std::uint64_t scheduled_at(int event) {
+    for (const Event &e : g_events)
+        if (e.id == event) return e.at;
+    return UINT64_MAX;
+}
+
 bool preempt(Cpu &c) {
     run_due_events();
     refill(c);
@@ -212,11 +218,11 @@ namespace {
 constexpr char kStateMagic[8] = {'P', 'S', '2', 'S', 'T', 'A', 'T', 'E'};
 constexpr std::uint32_t kStateVersion = 2;
 
-std::function<void()> event_action(int id) {
+std::function<void()> event_action(int id, std::uint64_t at) {
     if (id == hw::kEventVblank) return vblank;
     if (id == hw::kEventVblankEnd + 100) return [] { iop::vblank(false); };
     if (id >= hw::kEventCount) return kernel::alarm_action(id - hw::kEventCount);
-    return hw::event_action(id);
+    return hw::event_action(id, at);
 }
 
 std::atomic<std::uint32_t> g_vu_fence{0};
@@ -248,7 +254,7 @@ void machine_state(state::Stream &s) {
     s.vec(g_events, [&s](Event &e) {
         s.pod(e.id);
         s.pod(e.at);
-        if (s.loading()) e.action = event_action(e.id);
+        if (s.loading()) e.action = event_action(e.id, e.at);
     });
     kernel::state(s);
     hw::state(s);

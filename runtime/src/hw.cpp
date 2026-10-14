@@ -62,6 +62,13 @@ std::uint32_t timer_count(int n) {
     return static_cast<std::uint32_t>(((now() - t.base) / timer_divider(t)) & 0xFFFFu);
 }
 
+std::uint32_t timer_read(int n) {
+    const std::uint64_t due = scheduled_at(kEventTimer0 + n);
+    if (due > now()) return timer_count(n);
+    const Timer &t = g_timers[n];
+    return static_cast<std::uint32_t>(((due - 1 - t.base) / timer_divider(t)) & 0xFFFFu);
+}
+
 void timer_set_count(int n, std::uint32_t value) {
     Timer &t = g_timers[n];
     t.frozen = value & 0xFFFFu;
@@ -70,14 +77,14 @@ void timer_set_count(int n, std::uint32_t value) {
 
 void timer_schedule(int n);
 
-void timer_event(int n) {
+void timer_event(int n, std::uint64_t at) {
     Timer &t = g_timers[n];
     if (!(t.mode & 0x80u)) return;
-    const std::uint32_t count = timer_count(n);
+    const std::uint32_t count = static_cast<std::uint32_t>(((at - t.base) / timer_divider(t)) & 0xFFFFu);
     if (count == (t.comp & 0xFFFFu)) {
         t.mode |= 0x400u;
         if (t.mode & 0x100u) intc_raise(9u + static_cast<unsigned>(n));
-        if (t.mode & 0x40u) timer_set_count(n, 0);
+        if (t.mode & 0x40u) t.base = at;
     }
     if (count == 0 && !(t.mode & 0x40u && t.comp == 0)) {
         t.mode |= 0x800u;
@@ -101,7 +108,7 @@ void timer_schedule(int n) {
     if (!(t.mode & 0x100u)) ticks = to_overflow;
     const std::uint64_t div = timer_divider(t);
     const std::uint64_t at = t.base + ((now() - t.base) / div + ticks) * div;
-    schedule(kEventTimer0 + n, at, [n] { timer_event(n); });
+    schedule(kEventTimer0 + n, at, [n, at] { timer_event(n, at); });
 }
 
 int timer_index(std::uint32_t a) { return static_cast<int>((a >> 11) & 3u); }
@@ -192,7 +199,7 @@ std::uint32_t read32(std::uint32_t a) {
     if (is_timer(a)) {
         const int n = timer_index(a);
         switch (a & 0x30u) {
-        case 0x00: return timer_count(n);
+        case 0x00: return timer_read(n);
         case 0x10: return g_timers[n].mode;
         case 0x20: return g_timers[n].comp;
         default: return g_timers[n].hold;
@@ -286,9 +293,9 @@ void write128(std::uint32_t a, const Reg128 &v) {
 
 namespace ps2::hw {
 
-std::function<void()> event_action(int id) {
+std::function<void()> event_action(int id, std::uint64_t at) {
     if (id == kEventVblankEnd) return [] { intc_raise(3); };
-    if (id >= kEventTimer0 && id <= kEventTimer3) return [n = id - kEventTimer0] { timer_event(n); };
+    if (id >= kEventTimer0 && id <= kEventTimer3) return [n = id - kEventTimer0, at] { timer_event(n, at); };
     return [] {};
 }
 
