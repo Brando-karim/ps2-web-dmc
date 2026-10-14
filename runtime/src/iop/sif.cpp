@@ -486,6 +486,7 @@ bool fileio_async(std::uint32_t method, std::uint32_t args, std::uint32_t, std::
     switch (method) {
     case 255:
         g_fileio_result = word(0);
+        std::memcpy(g_ram + ret, g_loadfile_version, 4);
         return true;
     case 0: {
         const std::int32_t fd = iop::io::open(text(20), word(12));
