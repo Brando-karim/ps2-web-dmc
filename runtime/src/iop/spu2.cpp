@@ -405,7 +405,7 @@ std::uint32_t read_core(int core, std::uint32_t off) {
             if (k.voices[i].end) endx |= 1u << i;
         return off == 0x340 ? endx & 0xFFFFu : endx >> 16;
     }
-    case 0x344: return k.attr & 0x30u ? 0x80u : 0u;
+    case 0x344: return 0x80u;
     default: return k.regs[off >> 1];
     }
 }
