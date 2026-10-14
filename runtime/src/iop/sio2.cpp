@@ -68,16 +68,16 @@ Feel g_feel[2];
 Card g_card;
 Dma g_dma[2];
 
-void no_device(int port) { g_stat |= 0xC000u | (0x10000u << port); }
+void no_device() { g_stat |= 0xC000u | (0x10000u << (g_index & 15u)); }
 
 void controller(int port, std::size_t at, std::uint32_t out_size) {
-    if (port > 1 || !g_pads[port].connected) {
-        no_device(port);
+    const std::vector<std::uint8_t> in(g_in.begin(), g_in.end());
+    if (port > 1 || !g_pads[port].connected || in.empty() || in[0] != 0x01) {
+        no_device();
         return;
     }
     Pad &p = g_pads[port];
     Feel &f = g_feel[port];
-    const std::vector<std::uint8_t> in(g_in.begin(), g_in.end());
     const std::uint8_t cmd = in.size() > 1 ? in[1] : 0;
     auto put = [&](std::size_t i, std::uint8_t v) {
         if (i < out_size) g_out[at + i] = v;
@@ -185,7 +185,7 @@ void memory_card(std::size_t at, std::uint32_t out_size) {
     Card &c = g_card;
     const std::vector<std::uint8_t> in(g_in.begin(), g_in.end());
     if (!c.present || in.size() < 2 || in[0] != 0x81) {
-        no_device(2);
+        no_device();
         return;
     }
     const std::size_t n = out_size;
@@ -270,7 +270,7 @@ void process() {
     if (g_index == 0) g_stat = 0x1100u;
     const std::uint32_t device = g_ctrl2[port];
     if (port == 2) memory_card(at, out_size);
-    else if (device == 0x5FFFFu || device == 0x00030064u || port >= 2) no_device(port);
+    else if (device == 0x5FFFFu || device == 0x00030064u || port >= 2) no_device();
     else controller(port, at, out_size);
     g_in.clear();
     ++g_index;
