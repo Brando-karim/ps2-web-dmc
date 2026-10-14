@@ -341,10 +341,10 @@ Lower lower(std::uint32_t w, std::uint32_t pc) {
             c = std::format("{{ set_vi(r, {}, r.vi[{}] - 1u); std::uint8_t *q = qword(mem, r.vi[{}]); ", it, it, it) +
                 lanes_store(dest, "q", std::format("r.vf[{}]", fs)) + "} ";
             break;
-        case 0x38: c = std::format("vu::div(r, r.vf[{}].w[{}], r.vf[{}].w[{}]); ", fs, fsf, ft, ftf); break;
-        case 0x39: c = std::format("vu::sqrt(r, r.vf[{}].w[{}]); ", ft, ftf); break;
-        case 0x3A: c = std::format("vu::rsqrt(r, r.vf[{}].w[{}], r.vf[{}].w[{}]); ", fs, fsf, ft, ftf); break;
-        case 0x3B: break;
+        case 0x38: c = std::format("{{ const std::uint32_t qb = fl.begin_q(r); vu::div(r, r.vf[{}].w[{}], r.vf[{}].w[{}]); fl.end_q(r, qb, 7u); }} ", fs, fsf, ft, ftf); break;
+        case 0x39: c = std::format("{{ const std::uint32_t qb = fl.begin_q(r); vu::sqrt(r, r.vf[{}].w[{}]); fl.end_q(r, qb, 7u); }} ", ft, ftf); break;
+        case 0x3A: c = std::format("{{ const std::uint32_t qb = fl.begin_q(r); vu::rsqrt(r, r.vf[{}].w[{}], r.vf[{}].w[{}]); fl.end_q(r, qb, 13u); }} ", fs, fsf, ft, ftf); break;
+        case 0x3B: c = "fl.flush_q(r); "; break;
         case 0x3C: c = std::format("set_vi(r, {}, r.vf[{}].w[{}]); ", it, fs, fsf); break;
         case 0x3D:
             if (ft) l.writes = static_cast<int>(ft);
@@ -477,13 +477,16 @@ std::string generate(const Program &p, std::string &name) {
     const std::vector<std::uint32_t> pcs = ps2::vu::reachable(p.code.data(), kMask, p.entry);
     std::set<std::uint32_t> in(pcs.begin(), pcs.end());
     std::map<std::uint32_t, Lower> lowers;
-    bool any_status = false, any_flags = false;
+    bool any_status = false, any_flags = false, any_q = false;
     for (std::uint32_t pc : pcs) {
         const std::uint32_t lo = word(p.code, pc), hi = word(p.code, pc + 4);
         Lower l;
         if (!(hi & 0x80000000u)) l = lower(lo, pc);
+        for (const std::uint32_t latency : {7u, 13u})
+            replace_all(l.code, std::format("fl.end_q(r, qb, {}u)", latency), std::format("fl.end_q(r, qb, {}u)", ps2::vu::q_delay(p.code.data(), kMask, pc, latency)));
         any_status = any_status || l.reads_status;
         any_flags = any_flags || l.reads_flags;
+        any_q = any_q || l.code.find("fl.end_q(") != std::string::npos;
         lowers[pc] = l;
     }
     std::map<std::uint32_t, bool> live_in;
@@ -533,12 +536,18 @@ std::string generate(const Program &p, std::string &name) {
         for (std::int64_t s : successors(pc)) out_live = out_live || s < 0 || !in.count(static_cast<std::uint32_t>(s)) || live_in[static_cast<std::uint32_t>(s)];
         const Upper u = upper(hi, any_status ? true : (any_flags && out_live));
         const Lower &l = lowers[pc];
+        std::string body = u.pre;
+        if (hi & 0x80000000u) body += std::format("r.i = {}u; ", lo);
+        else if (!l.supported) body += std::format("vu::interpret(1, {}u); return; ", pc);
+        else body += l.code;
+        body += u.post;
         o += std::format("{}: {{ ++fl.t; ", label(pc));
-        o += u.pre;
-        if (hi & 0x80000000u) o += std::format("r.i = {}u; ", lo);
-        else if (!l.supported) o += std::format("vu::interpret(1, {}u); return; ", pc);
-        else o += l.code;
-        o += u.post;
+        if (any_q && ps2::vu::reads_q(hi)) {
+            const ps2::vu::QRead kind = ps2::vu::q_read_kind(p.code.data(), kMask, pc);
+            if (kind == ps2::vu::kQNew) o += "fl.flush_q(r); ";
+            else if (kind == ps2::vu::kQDynamic) o += "fl.sync_q(r); ";
+        }
+        o += body;
         const int lower_write = (hi & 0x80000000u) || !l.supported ? -1 : l.writes;
         if (lower_write >= 0 && shadowed.count(lower_write)) o += std::format("{} = vfix(vload({})); ", shadow(lower_write), raw(lower_write));
         if (u.target >= 0 && u.target != lower_write && shadowed.count(u.target)) {
@@ -564,6 +573,10 @@ std::string generate(const Program &p, std::string &name) {
         if (!in.count(next)) o += std::format("    vu::interpret(1, {}u);\n    return;\n", next);
     }
     o += "dispatch:\n    vu::interpret(1, jpc);\n    return;\n}\n\n";
+    if (any_q) {
+        replace_all(o, "vu::interpret(", "fl.flush_q(r); vu::interpret(");
+        replace_all(o, "r.tpc = ", "fl.flush_q(r); r.tpc = ");
+    }
     return local_vi(o);
 }
 

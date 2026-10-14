@@ -11,7 +11,7 @@ namespace ps2::vu::jit {
 
 const char *const kImportNames[kImports] = {
     "clip_value", "clip_post", "set_clip", "start", "mac", "status", "clip", "force_mac", "mul", "msub", "to_fixed", "from_fixed",
-    "div", "sqrt", "rsqrt", "efu", "kick", "top", "itop", "rand_next", "interpret",
+    "div", "sqrt", "rsqrt", "efu", "kick", "top", "itop", "rand_next", "interpret", "sync_q", "flush_q",
 };
 
 namespace {
@@ -26,7 +26,7 @@ struct ImportType {
 
 constexpr ImportType kImportTypes[kImports] = {
     {3, true}, {3, false}, {3, false}, {2, false}, {1, true}, {1, true}, {1, true}, {2, false}, {2, true}, {3, true}, {2, true}, {2, true},
-    {3, false}, {2, false}, {3, false}, {4, false}, {1, false}, {0, true}, {0, true}, {1, true}, {1, false},
+    {4, false}, {3, false}, {4, false}, {4, false}, {1, false}, {0, true}, {0, true}, {1, true}, {2, false}, {1, false}, {1, false},
 };
 
 enum Local : std::uint32_t {
@@ -899,20 +899,26 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
             c_.get(kR);
             mem_lane(fs, fsf);
             mem_lane(ft, ftf);
+            c_.i32c(q_delay(code_, kMask, pc, 7));
             c_.call(kDiv);
             break;
         case 0x39:
             c_.get(kR);
             mem_lane(ft, ftf);
+            c_.i32c(q_delay(code_, kMask, pc, 7));
             c_.call(kSqrt);
             break;
         case 0x3A:
             c_.get(kR);
             mem_lane(fs, fsf);
             mem_lane(ft, ftf);
+            c_.i32c(q_delay(code_, kMask, pc, 13));
             c_.call(kRsqrt);
             break;
-        case 0x3B: break;
+        case 0x3B:
+            c_.get(kR);
+            c_.call(kFlushQ);
+            break;
         case 0x3C: set_vi(it, [&] { mem_lane(fs, fsf); }); break;
         case 0x3D:
             if (ft) {
@@ -1320,12 +1326,20 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
         c_.i32c(1);
         c_.op(kOpAdd);
         c_.store(0);
+        if (reads_q(hi)) {
+            const QRead kind = q_read_kind(code_, kMask, pc);
+            if (kind != kQOld) {
+                c_.get(kR);
+                c_.call(kind == kQNew ? kFlushQ : kSyncQ);
+            }
+        }
         upper_pre(u, flags_live);
         if (hi & 0x80000000u) {
             c_.get(kR);
             c_.i32c(lo);
             c_.store(kOffI);
         } else if (!li.supported || !lower(lo, pc)) {
+            c_.get(kR);
             c_.i32c(pc);
             c_.tail(kInterpret);
         }
@@ -1365,6 +1379,8 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
             if (word(prev + 4) & 0x40000000u) {
                 c_.get(kEnding);
                 c_.open_if();
+                c_.get(kR);
+                c_.call(kFlushQ);
                 c_.get(kR);
                 if (pl.branch || pl.jump) {
                     if (pl.branch) c_.i32c(pl.target & kMask);
@@ -1406,11 +1422,13 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
         }
         const std::uint32_t next = (pc + 8u) & kMask;
         if (!in_.count(next)) {
+            c_.get(kR);
             c_.i32c(next);
             c_.tail(kInterpret);
         }
     }
     c_.byte(0x0B);
+    c_.get(kR);
     c_.get(kPcw);
     c_.i32c(3);
     c_.op(kOpShl);

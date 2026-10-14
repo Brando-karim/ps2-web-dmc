@@ -37,7 +37,37 @@ struct Unit {
 };
 
 Vu0Regs g_vu1;
+std::uint32_t g_generation[2] = {1, 1};
 std::uint32_t g_top = 0, g_itop = 0;
+
+struct QDelay {
+    std::uint32_t generation = 0, value = 0;
+};
+
+QDelay g_q_delay[2][2048], g_q_kind[2][2048];
+
+void read_q(const Unit &u, vuops::FlagPipe &pipe, Vu0Regs &r, std::uint32_t pc, std::uint32_t hi) {
+    if (!pipe.q_pending || !reads_q(hi)) return;
+    const int n = u.code == g_vu1_code ? 1 : 0;
+    QDelay &d = g_q_kind[n][(pc & u.code_mask) >> 3];
+    if (d.generation != g_generation[n]) {
+        d.generation = g_generation[n];
+        d.value = q_read_kind(u.code, u.code_mask, pc);
+    }
+    if (d.value == kQNew) pipe.flush_q(r);
+    else if (d.value == kQDynamic) pipe.sync_q(r);
+}
+
+std::uint32_t q_delay_of(const Unit &u, std::uint32_t pc, std::uint32_t latency) {
+    const int n = u.code == g_vu1_code ? 1 : 0;
+    QDelay &d = g_q_delay[n][(pc & u.code_mask) >> 3];
+    if (d.generation != g_generation[n]) {
+        d.generation = g_generation[n];
+        d.value = q_delay(u.code, u.code_mask, pc, latency);
+    }
+    return d.value;
+}
+
 std::uint64_t g_reported = 0;
 
 Unit unit_of(int n) {
@@ -489,10 +519,25 @@ void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool 
             for (int i = 0; i < 4; ++i) if (dest & (8u >> i)) std::memcpy(q + i * 4, &r.vf[fs].w[i], 4);
             break;
         }
-        case 0x38: vu::div(r, r.vf[fs].w[fsf], r.vf[ft].w[ftf]); break;
-        case 0x39: vu::sqrt(r, r.vf[ft].w[ftf]); break;
-        case 0x3A: vu::rsqrt(r, r.vf[fs].w[fsf], r.vf[ft].w[ftf]); break;
-        case 0x3B: break;
+        case 0x38: {
+            const std::uint32_t before = u.pipe ? u.pipe->begin_q(r) : r.q;
+            vu::div(r, r.vf[fs].w[fsf], r.vf[ft].w[ftf]);
+            if (u.pipe) u.pipe->end_q(r, before, q_delay_of(u, pc, 7));
+            break;
+        }
+        case 0x39: {
+            const std::uint32_t before = u.pipe ? u.pipe->begin_q(r) : r.q;
+            vu::sqrt(r, r.vf[ft].w[ftf]);
+            if (u.pipe) u.pipe->end_q(r, before, q_delay_of(u, pc, 7));
+            break;
+        }
+        case 0x3A: {
+            const std::uint32_t before = u.pipe ? u.pipe->begin_q(r) : r.q;
+            vu::rsqrt(r, r.vf[fs].w[fsf], r.vf[ft].w[ftf]);
+            if (u.pipe) u.pipe->end_q(r, before, q_delay_of(u, pc, 13));
+            break;
+        }
+        case 0x3B: if (u.pipe) u.pipe->flush_q(r); break;
         case 0x3C: store_vi(r, it, r.vf[fs].w[fsf]); break;
         case 0x3D: if (ft) { const std::uint32_t v = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(r.vi[is]))); for (int i = 0; i < 4; ++i) if (dest & (8u >> i)) r.vf[ft].w[i] = v; } break;
         case 0x3E: {
@@ -638,7 +683,6 @@ void set_tops(std::uint32_t top, std::uint32_t itop) {
 void run_fast(int n, std::uint32_t address);
 
 std::unordered_map<std::uint64_t, ProgramFn> g_programs;
-std::uint32_t g_generation[2] = {1, 1};
 
 struct Candidate {
     std::vector<std::uint32_t> runs;
@@ -882,6 +926,7 @@ void run_fast(int n, std::uint32_t address) {
         pc = npc;
         npc = (npc + 8u) & u.code_mask;
         ++pipe.t;
+        read_q(u, pipe, r, current, hi);
         fast_upper(r, d, out);
         if (hi & 0x80000000u) {
             r.i = lo;
@@ -910,6 +955,7 @@ void run_fast(int n, std::uint32_t address) {
         r.vf[0].w[3] = fp::kOne;
         r.vi[0] = 0;
         if (ending) {
+            pipe.flush_q(r);
             r.tpc = pc;
             return;
         }
@@ -939,6 +985,7 @@ void run(int n, std::uint32_t address) {
         pc = npc;
         npc = (npc + 8u) & u.code_mask;
         ++pipe.t;
+        read_q(u, pipe, r, current, hi);
         UpperOut out = upper(r, hi);
         bool branch = false;
         if (hi & 0x80000000u) {
@@ -959,6 +1006,7 @@ void run(int n, std::uint32_t address) {
         r.vf[0].w[3] = fp::kOne;
         r.vi[0] = 0;
         if (ending) {
+            pipe.flush_q(r);
             r.tpc = pc;
             return;
         }

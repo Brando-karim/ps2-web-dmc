@@ -71,6 +71,226 @@ inline std::vector<std::uint32_t> reachable(const std::uint8_t *code, std::uint3
     return sorted;
 }
 
+struct VfUse {
+    std::uint8_t reg[4] = {}, mask[4] = {}, wreg[2] = {}, wmask[2] = {};
+    unsigned n = 0, wn = 0;
+    std::uint16_t vi_reads = 0;
+    unsigned vi_load = 0;
+    void read_vi(unsigned r) { vi_reads = static_cast<std::uint16_t>(vi_reads | ((1u << (r & 15u)) & ~1u)); }
+    void read(unsigned r, unsigned m) {
+        if (r && m) {
+            reg[n] = static_cast<std::uint8_t>(r);
+            mask[n++] = static_cast<std::uint8_t>(m);
+        }
+    }
+    void write(unsigned r, unsigned m) {
+        if (r && m) {
+            wreg[wn] = static_cast<std::uint8_t>(r);
+            wmask[wn++] = static_cast<std::uint8_t>(m);
+        }
+    }
+};
+
+inline VfUse vf_use(std::uint32_t lo, std::uint32_t hi) {
+    VfUse u;
+    const unsigned dest = (hi >> 21) & 15u, ft = (hi >> 16) & 31u, fs = (hi >> 11) & 31u, fd = (hi >> 6) & 31u, bc = 8u >> (hi & 3u), funct = hi & 63u;
+    if (funct < 0x3C) {
+        if (funct < 0x1C) {
+            u.read(fs, dest);
+            u.read(ft, bc);
+        } else if (funct < 0x28) {
+            u.read(fs, dest);
+        } else if (funct == 0x2E) {
+            u.read(fs, 0xE);
+            u.read(ft, 0xE);
+        } else {
+            u.read(fs, dest);
+            u.read(ft, dest);
+        }
+        u.write(fd, funct == 0x2E ? 0xE : dest);
+    } else {
+        const unsigned index = ((hi >> 6) & 31u) * 4u + (funct & 3u);
+        if (index < 0x10 || (index >= 0x18 && index < 0x1C)) {
+            u.read(fs, dest);
+            u.read(ft, bc);
+        } else if (index < 0x18 || index == 0x1D) {
+            u.read(fs, dest);
+            u.write(ft, dest);
+        } else if (index == 0x1F) {
+            u.read(fs, 0xE);
+            u.read(ft, 1);
+        } else if (index < 0x28) {
+            u.read(fs, dest);
+        } else if (index == 0x2E) {
+            u.read(fs, 0xE);
+            u.read(ft, 0xE);
+        } else if (index < 0x2F) {
+            u.read(fs, dest);
+            u.read(ft, dest);
+        }
+    }
+    if (hi & 0x80000000u) return u;
+    const unsigned ldest = (lo >> 21) & 15u, lft = (lo >> 16) & 31u, lfs = (lo >> 11) & 31u, fsf = 8u >> ((lo >> 21) & 3u), ftf = 8u >> ((lo >> 23) & 3u);
+    const unsigned it = (lo >> 16) & 15u, is = (lo >> 11) & 15u, major = lower_major(lo);
+    if (major == 0x00 || major == 0x08 || major == 0x09 || major == 0x18 || major == 0x1A || major == 0x1B || major == 0x24 || major == 0x25 || (major >= 0x2C && major <= 0x2F)) u.read_vi(is);
+    if (major == 0x01) u.read_vi(it);
+    if (major == 0x04 || major == 0x05 || major == 0x28 || major == 0x29) u.read_vi(is);
+    if (major == 0x05 || major == 0x28 || major == 0x29) u.read_vi(it);
+    if (major == 0x04) u.vi_load = it;
+    if (major == 0x40 && (lo & 0x3Cu) != 0x3Cu) {
+        const unsigned funct = lo & 0x3Fu;
+        if (funct == 0x30 || funct == 0x31 || funct == 0x32 || funct == 0x34 || funct == 0x35) u.read_vi(is);
+        if (funct == 0x30 || funct == 0x31 || funct == 0x34 || funct == 0x35) u.read_vi(it);
+    }
+    if (major == 0x40 && (lo & 0x3Cu) == 0x3Cu) {
+        const unsigned index = ((lo >> 6) & 31u) * 4u + (lo & 3u);
+        if (index == 0x34 || index == 0x36 || index == 0x3D || index == 0x3E || index == 0x3F || index == 0x6C) u.read_vi(is);
+        if (index == 0x35 || index == 0x37 || index == 0x3F) u.read_vi(it);
+        if (index == 0x3E) u.vi_load = it;
+    }
+    if (major == 0x00) u.write(lft, ldest);
+    else if (major == 0x01) u.read(lfs, ldest);
+    else if (major == 0x40 && (lo & 0x3Cu) == 0x3Cu) {
+        const unsigned index = ((lo >> 6) & 31u) * 4u + (lo & 3u);
+        switch (index) {
+        case 0x30: u.read(lfs, ldest); u.write(lft, ldest); break;
+        case 0x31: u.read(lfs, ((ldest >> 1) | (ldest << 3)) & 15u); u.write(lft, ldest); break;
+        case 0x34: case 0x36: case 0x3D: case 0x40: case 0x41: case 0x64: u.write(lft, ldest); break;
+        case 0x35: case 0x37: u.read(lfs, ldest); break;
+        case 0x38: case 0x3A: u.read(lfs, fsf); u.read(lft, ftf); break;
+        case 0x39: u.read(lft, ftf); break;
+        case 0x3C: case 0x42: case 0x43: u.read(lfs, fsf); break;
+        default: if (index >= 0x70) u.read(lfs, 0xF); break;
+        }
+    }
+    return u;
+}
+
+inline std::uint32_t issue(const VfUse &u, std::uint32_t cycle, const std::uint32_t (&ready)[32][4], const std::uint32_t (&vi_ready)[16]) {
+    for (unsigned i = 0; i < u.n; ++i)
+        for (unsigned lane = 0; lane < 4; ++lane)
+            if (u.mask[i] & (8u >> lane)) cycle = std::max(cycle, ready[u.reg[i]][lane]);
+    for (unsigned r = 1; r < 16; ++r)
+        if (u.vi_reads & (1u << r)) cycle = std::max(cycle, vi_ready[r]);
+    return cycle;
+}
+
+inline void retire(const VfUse &u, std::uint32_t cycle, std::uint32_t (&ready)[32][4], std::uint32_t (&vi_ready)[16]) {
+    for (unsigned i = 0; i < u.wn; ++i)
+        for (unsigned lane = 0; lane < 4; ++lane)
+            if (u.wmask[i] & (8u >> lane)) ready[u.wreg[i]][lane] = cycle + 4u;
+    if (u.vi_load) vi_ready[u.vi_load] = cycle + 4u;
+}
+
+inline std::uint32_t q_delay(const std::uint8_t *code, std::uint32_t mask, std::uint32_t pc, std::uint32_t latency) {
+    std::uint32_t ready[32][4] = {}, vi_ready[16] = {};
+    std::uint32_t cycle = 0, issued = 0;
+    for (int k = -3; k <= static_cast<int>(latency); ++k) {
+        const std::uint32_t at = (pc + static_cast<std::uint32_t>(k) * 8u) & mask;
+        std::uint32_t lo, hi;
+        std::memcpy(&lo, code + at, 4);
+        std::memcpy(&hi, code + at + 4, 4);
+        const VfUse u = vf_use(lo, hi);
+        cycle = issue(u, cycle + 1u, ready, vi_ready);
+        if (k == 0) issued = cycle;
+        else if (k > 0 && cycle >= issued + latency) return static_cast<std::uint32_t>(k);
+        retire(u, cycle, ready, vi_ready);
+    }
+    return latency;
+}
+
+inline std::uint32_t q_unit_latency(std::uint32_t lo, std::uint32_t hi) {
+    if ((hi & 0x80000000u) || lower_major(lo) != 0x40 || (lo & 0x3Cu) != 0x3Cu) return 0;
+    const unsigned index = ((lo >> 6) & 31u) * 4u + (lo & 3u);
+    return index == 0x38 || index == 0x39 ? 7u : index == 0x3A ? 13u : 0u;
+}
+
+inline bool waits_q(std::uint32_t lo, std::uint32_t hi) {
+    return !(hi & 0x80000000u) && lower_major(lo) == 0x40 && (lo & 0x3Fu) == 0x3Fu && ((lo >> 6) & 31u) == 0x0Eu;
+}
+
+inline bool reads_q(std::uint32_t hi) {
+    const unsigned funct = hi & 63u, op = funct < 0x3C ? funct : ((hi >> 6) & 31u) * 4u + (funct & 3u);
+    return op == 0x1C || op == 0x20 || op == 0x21 || op == 0x24 || op == 0x25;
+}
+
+enum QRead : std::uint8_t { kQDynamic, kQNew, kQOld };
+
+inline QRead q_read_kind(const std::uint8_t *code, std::uint32_t mask, std::uint32_t pc) {
+    const auto load = [&](std::uint32_t a, std::uint32_t &lo, std::uint32_t &hi) {
+        std::memcpy(&lo, code + (a & mask), 4);
+        std::memcpy(&hi, code + (a & mask) + 4, 4);
+    };
+    {
+        std::uint32_t lo, hi;
+        load(pc, lo, hi);
+        if (waits_q(lo, hi) || q_unit_latency(lo, hi)) return kQNew;
+    }
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> jumps;
+    for (std::uint32_t a = 0; a <= mask; a += 8) {
+        std::uint32_t lo, hi;
+        load(a, lo, hi);
+        if (!(hi & 0x80000000u) && is_branch(lo) && !is_jump_register(lo)) jumps.emplace_back(branch_target(lo, a, mask), (a + 8u) & mask);
+    }
+    const auto preds = [&](std::uint32_t y) {
+        std::vector<std::uint32_t> out;
+        std::uint32_t lo, hi;
+        load(y - 16u, lo, hi);
+        const bool jumped = !(hi & 0x80000000u) && is_branch(lo) && (is_unconditional(lo) || is_jump_register(lo));
+        if (!jumped && !(hi & 0x40000000u)) out.push_back((y - 8u) & mask);
+        for (const auto &[target, slot] : jumps)
+            if (target == (y & mask)) out.push_back(slot);
+        return out;
+    };
+    const auto complete = [&](const std::vector<std::uint32_t> &back, std::uint32_t latency) {
+        std::vector<std::uint32_t> order;
+        const std::uint32_t div = back.back();
+        for (std::uint32_t k = 3; k > 0; --k) order.push_back((div - 8u * k) & mask);
+        order.insert(order.end(), back.rbegin(), back.rend());
+        std::uint32_t ready[32][4] = {}, vi_ready[16] = {};
+        std::uint32_t cycle = 0, issued = 0;
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            std::uint32_t lo, hi;
+            load(order[i], lo, hi);
+            const VfUse u = vf_use(lo, hi);
+            cycle = issue(u, cycle + 1u, ready, vi_ready);
+            if (i == 3) issued = cycle;
+            retire(u, cycle, ready, vi_ready);
+        }
+        return cycle >= issued + latency;
+    };
+    bool any_new = false, any_old = false;
+    unsigned budget = 4096;
+    std::vector<std::vector<std::uint32_t>> stack{{pc & mask}};
+    while (!stack.empty()) {
+        if (!--budget) return kQDynamic;
+        const std::vector<std::uint32_t> path = std::move(stack.back());
+        stack.pop_back();
+        const std::uint32_t at = path.back();
+        if (path.size() > 1) {
+            std::uint32_t lo, hi;
+            load(at, lo, hi);
+            if (const std::uint32_t latency = q_unit_latency(lo, hi)) {
+                (complete(path, latency) ? any_new : any_old) = true;
+                continue;
+            }
+            if (waits_q(lo, hi) || path.size() > 15) {
+                any_new = true;
+                continue;
+            }
+        }
+        const std::vector<std::uint32_t> from = preds(at);
+        if (from.empty()) any_new = true;
+        for (std::uint32_t p : from) {
+            std::vector<std::uint32_t> next = path;
+            next.push_back(p);
+            stack.push_back(std::move(next));
+        }
+        if (any_new && any_old) return kQDynamic;
+    }
+    return any_old ? kQOld : kQNew;
+}
+
 inline std::uint64_t program_key(const std::uint8_t *code, const std::vector<std::uint32_t> &pcs, std::uint32_t entry) {
     std::uint64_t h = 0xCBF29CE484222325ull ^ entry;
     const auto mix = [&](std::uint32_t v) {
@@ -234,6 +454,27 @@ struct FlagPipe {
     std::uint32_t t = 16;
     std::uint32_t mac_ts[8] = {}, mac_v[8] = {}, status_v[8] = {}, clip_ts[8] = {}, clip_v[8] = {};
     unsigned mh = 0, ch = 0;
+    std::uint32_t q_value = 0, q_ready = 0;
+    bool q_pending = false;
+
+    PS2_VU_INLINE std::uint32_t begin_q(Vu0Regs &r) {
+        flush_q(r);
+        return r.q;
+    }
+    PS2_VU_INLINE void end_q(Vu0Regs &r, std::uint32_t before, std::uint32_t latency) {
+        q_value = r.q;
+        r.q = before;
+        q_ready = t + latency;
+        q_pending = true;
+    }
+    PS2_VU_INLINE void sync_q(Vu0Regs &r) {
+        if (q_pending && t >= q_ready) flush_q(r);
+    }
+    PS2_VU_INLINE void flush_q(Vu0Regs &r) {
+        if (!q_pending) return;
+        r.q = q_value;
+        q_pending = false;
+    }
 
     void start(const Vu0Regs &r) {
         for (int i = 0; i < 8; ++i) {

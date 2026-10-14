@@ -12,7 +12,7 @@ struct Layout {
 
 enum Import : std::uint32_t {
     kClipValue, kClipPost, kSetClip, kStart, kMac, kStatus, kClip, kForceMac, kMul, kMsub, kToFixed, kFromFixed,
-    kDiv, kSqrt, kRsqrt, kEfu, kKick, kTop, kItop, kRandNext, kInterpret, kImports
+    kDiv, kSqrt, kRsqrt, kEfu, kKick, kTop, kItop, kRandNext, kInterpret, kSyncQ, kFlushQ, kImports
 };
 
 extern const char *const kImportNames[kImports];
