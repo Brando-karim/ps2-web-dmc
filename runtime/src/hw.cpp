@@ -187,7 +187,7 @@ void dmac_raise(unsigned channel) {
 }
 
 std::uint32_t read32(std::uint32_t a) {
-    if (a == kIntcStat) return g_intc_stat | g_intc_latched;
+    if (a == kIntcStat) return g_intc_stat | (kernel::interruptible() ? g_intc_latched : 0u);
     if (a == kIntcMask) return g_intc_mask;
     if (a == kDmacStat) return g_dmac_stat;
     if (a >= 0x12000000u && a < 0x12002000u) return static_cast<std::uint32_t>(gs::read_privileged(a & ~7u) >> ((a & 4u) * 8));

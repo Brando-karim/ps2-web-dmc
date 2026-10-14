@@ -412,6 +412,7 @@ bool must_unwind() {
 }
 
 bool in_handler() { return g_in_handler; }
+bool interruptible() { return interrupts_enabled() && !g_in_handler; }
 int current_thread() { return g_current; }
 
 void service(Cpu &c) {
