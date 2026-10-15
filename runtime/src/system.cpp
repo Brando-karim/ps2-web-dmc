@@ -103,9 +103,15 @@ void dump_frame() {
 void apply_presses() {
     if (g_options.presses.empty()) return;
     std::uint16_t mask = 0;
+    std::uint8_t stick = 0;
     for (const Press &p : g_options.presses)
-        if (g_frames >= p.frame && g_frames < p.frame + p.frames) mask |= p.buttons;
+        if (g_frames >= p.frame && g_frames < p.frame + p.frames) {
+            mask |= p.buttons;
+            stick |= p.stick;
+        }
     iop::sio2::set_buttons(0, mask);
+    iop::sio2::set_axis(0, 2, (stick & 4u) ? 0x00 : (stick & 8u) ? 0xFF : 0x80);
+    iop::sio2::set_axis(0, 3, (stick & 1u) ? 0x00 : (stick & 2u) ? 0xFF : 0x80);
 }
 
 void time_frames() {
@@ -494,6 +500,8 @@ bool parse_press(const std::string &spec, Press &press) {
         rest = rest.substr(0, second);
     }
     press.buttons = 0;
+    press.stick = 0;
+    static const char *const kStick[4] = {"lup", "ldown", "lleft", "lright"};
     std::size_t start = 0;
     while (start <= rest.size()) {
         const auto plus = rest.find('+', start);
@@ -501,8 +509,12 @@ bool parse_press(const std::string &spec, Press &press) {
         int bit = -1;
         for (int i = 0; i < 16; ++i)
             if (name == kNames[i]) bit = i;
-        if (bit < 0) return false;
-        press.buttons |= static_cast<std::uint16_t>(1u << bit);
+        int axis = -1;
+        for (int i = 0; i < 4; ++i)
+            if (name == kStick[i]) axis = i;
+        if (bit < 0 && axis < 0) return false;
+        if (bit >= 0) press.buttons |= static_cast<std::uint16_t>(1u << bit);
+        else press.stick |= static_cast<std::uint8_t>(1u << axis);
         if (plus == std::string::npos) break;
         start = plus + 1;
     }
