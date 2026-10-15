@@ -20,6 +20,8 @@ constexpr int kErrorUnknownSema = -408;
 constexpr int kErrorUnknownEvent = -409;
 constexpr int kErrorUnknownMbx = -410;
 constexpr int kErrorUnknownFpl = -412;
+constexpr int kErrorUnknownVpl = -411;
+constexpr int kErrorWaitDelete = -425;
 constexpr int kErrorSemaZero = -419;
 constexpr int kErrorEventCondition = -421;
 constexpr int kErrorMbxNone = -424;
@@ -99,6 +101,17 @@ struct Fpl {
     std::deque<int> waiters;
 };
 
+struct VplWaiter {
+    int thread;
+    std::uint32_t size;
+};
+
+struct Vpl {
+    std::uint32_t attr, option, base, size;
+    std::map<std::uint32_t, std::uint32_t> blocks;
+    std::deque<VplWaiter> waiters;
+};
+
 struct VblankHandler {
     int edge;
     std::uint32_t handler, arg;
@@ -113,6 +126,7 @@ std::map<int, Sema> g_semas;
 std::map<int, EventFlag> g_events;
 std::map<int, Mbx> g_mbxs;
 std::map<int, Fpl> g_fpls;
+std::map<int, Vpl> g_vpls;
 std::map<std::uint32_t, std::set<std::uint32_t>> g_heaps;
 std::vector<VblankHandler> g_vblank_handlers;
 std::vector<int> g_vblank_start_waiters, g_vblank_end_waiters;
@@ -682,6 +696,97 @@ void install_thfpool() {
     });
 }
 
+std::uint32_t vpl_take(Vpl &v, std::uint32_t size) {
+    size = (size + 7u) & ~7u;
+    if (size == 0u) size = 8u;
+    std::uint32_t at = v.base;
+    for (const auto &[address, length] : v.blocks) {
+        if (address - at >= size) break;
+        at = address + length;
+    }
+    if (at + size > v.base + v.size) return 0;
+    v.blocks[at] = size;
+    return at;
+}
+
+std::uint32_t vpl_used(const Vpl &v) {
+    std::uint32_t used = 0;
+    for (const auto &[address, length] : v.blocks) {
+        (void)address;
+        used += length;
+    }
+    return used;
+}
+
+void install_thvpool() {
+    register_hle_library("thvpool", 0x0101);
+    def("thvpool", 4, "CreateVpl", [](Cpu &c) {
+        const std::uint32_t p = arg(c, 0);
+        Vpl v{read32(p), read32(p + 4), 0, (read32(p + 8) + 7u) & ~7u, {}, {}};
+        v.base = alloc(v.size);
+        if (!v.base) { c.r[2] = static_cast<std::uint32_t>(kErrorNoMemory); return; }
+        const int id = g_next_object++;
+        g_vpls[id] = v;
+        c.r[2] = static_cast<std::uint32_t>(id);
+    });
+    def("thvpool", 5, "DeleteVpl", [](Cpu &c) {
+        auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
+        if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
+        for (const VplWaiter &w : it->second.waiters)
+            if (Thread *th = thread(w.thread)) wake(*th, static_cast<std::uint32_t>(kErrorWaitDelete));
+        if (!it->second.waiters.empty()) reschedule();
+        free(it->second.base);
+        g_vpls.erase(it);
+        c.r[2] = 0;
+    });
+    def("thvpool", 6, "AllocateVpl", [](Cpu &c) {
+        auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
+        if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
+        if (const std::uint32_t at = vpl_take(it->second, arg(c, 1))) { c.r[2] = at; return; }
+        it->second.waiters.push_back(VplWaiter{current() ? current()->id : 0, arg(c, 1)});
+        block(c, kWaitVpl, it->first);
+    });
+    auto poll = [](Cpu &c) {
+        auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
+        if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
+        const std::uint32_t at = vpl_take(it->second, arg(c, 1));
+        c.r[2] = at ? at : static_cast<std::uint32_t>(kErrorNoMemory);
+    };
+    def("thvpool", 7, "pAllocateVpl", poll);
+    def("thvpool", 8, "ipAllocateVpl", poll);
+    def("thvpool", 9, "FreeVpl", [](Cpu &c) {
+        auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
+        if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
+        Vpl &v = it->second;
+        v.blocks.erase(arg(c, 1));
+        bool woke = false;
+        while (!v.waiters.empty()) {
+            const std::uint32_t at = vpl_take(v, v.waiters.front().size);
+            if (!at) break;
+            if (Thread *th = thread(v.waiters.front().thread)) wake(*th, at);
+            v.waiters.pop_front();
+            woke = true;
+        }
+        if (woke) reschedule();
+        c.r[2] = 0;
+    });
+    auto refer = [](Cpu &c) {
+        auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
+        if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
+        const Vpl &v = it->second;
+        if (const std::uint32_t p = arg(c, 1)) {
+            write32(p + 0, v.attr);
+            write32(p + 4, v.option);
+            write32(p + 8, v.size);
+            write32(p + 12, v.size - vpl_used(v));
+            write32(p + 16, static_cast<std::uint32_t>(v.waiters.size()));
+        }
+        c.r[2] = 0;
+    };
+    def("thvpool", 11, "ReferVplStatus", refer);
+    def("thvpool", 12, "iReferVplStatus", refer);
+}
+
 void install_sysclib() {
     register_hle_library("sysclib", 0x0103);
     def("sysclib", 4, "setjmp", [](Cpu &c) {
@@ -1081,6 +1186,7 @@ void install_libraries() {
     g_events.clear();
     g_mbxs.clear();
     g_fpls.clear();
+    g_vpls.clear();
     g_heaps.clear();
     g_vblank_handlers.clear();
     g_vblank_start_waiters.clear();
@@ -1108,6 +1214,7 @@ void install_libraries() {
     install_thevent();
     install_thmsgbx();
     install_thfpool();
+    install_thvpool();
     install_sysclib();
     install_stdio();
     install_modload();
@@ -1148,6 +1255,15 @@ void libs_state(ps2::state::Stream &s) {
         s.vec(v.free);
         s.deque(v.waiters);
     });
+    if (s.version() >= 3)
+        s.map(g_vpls, [&s](Vpl &v) {
+            s.pod(v.attr);
+            s.pod(v.option);
+            s.pod(v.base);
+            s.pod(v.size);
+            s.map(v.blocks);
+            s.deque(v.waiters);
+        });
     s.map(g_heaps, [&s](std::set<std::uint32_t> &v) { s.set(v); });
     s.vec(g_vblank_handlers);
     s.vec(g_vblank_start_waiters);
