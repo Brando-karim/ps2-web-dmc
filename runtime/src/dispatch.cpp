@@ -32,7 +32,11 @@ std::uint32_t g_module_span = 0;
 std::vector<Instance> g_instances;
 
 bool loaded_at(const ModuleInfo &m, std::uint32_t base) {
-    if (ld32(base + 0x2Cu) != m.size) return false;
+    if (m.fixed_base) {
+        if (base != m.fixed_base) return false;
+    } else if (ld32(base + 0x2Cu) != m.size) {
+        return false;
+    }
     for (std::uint32_t k = 0; k < m.check_count; ++k)
         if (ld32(base + m.checks[2 * k]) != m.checks[2 * k + 1]) return false;
     return true;
@@ -47,6 +51,15 @@ const Instance *instance_for(std::uint32_t pc) {
         break;
     }
     if (!g_module_count || pc >= kRamSize) return nullptr;
+    // A code window rewritten by the game holds fixed base modules, each an
+    // image of one content. The one whose check words are in place serves it.
+    for (std::uint32_t k = 0; k < g_module_count; ++k) {
+        const ModuleInfo &m = g_modules[k];
+        if (m.fixed_base && pc - m.fixed_base < m.size && loaded_at(m, m.fixed_base)) {
+            g_instances.push_back({m.fixed_base, &m});
+            return &g_instances.back();
+        }
+    }
     for (std::uint32_t at = pc & ~15u; pc - at < g_module_span; at -= 16) {
         if (ld32(at) == kModuleMagic) {
             for (std::uint32_t k = 0; k < g_module_count; ++k)

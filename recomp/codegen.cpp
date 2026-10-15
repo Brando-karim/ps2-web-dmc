@@ -798,17 +798,18 @@ void generate(const std::vector<Translation> &translations, const CodegenOptions
             header << "void " << r.function << "(ps2::Cpu &c, std::uint32_t entry, std::uint32_t depth);\n";
             header << "extern const std::uint16_t " << r.table << "[];\n";
         }
-        table << "const ps2::UnitInfo " << (t.relocatable ? t.prefix + "units" : "kUnits") << "[] = {\n";
-        for (const UnitRow &r : rows) table << std::format("    {{{}, {}u, &{}, {}}},\n", hex(r.base), r.size, r.function, r.table);
+        table << "const ps2::UnitInfo " << (t.relocatable || t.fixed_module ? t.prefix + "units" : "kUnits") << "[] = {\n";
+        for (const UnitRow &r : rows)
+            table << std::format("    {{{}, {}u, &{}, {}}},\n", hex(t.fixed_module ? r.base - t.fixed_base : r.base), r.size, r.function, r.table);
         table << "};\n\n";
-        if (!t.relocatable) {
+        if (!t.relocatable && !t.fixed_module) {
             main_units = rows.size();
             continue;
         }
         table << "const std::uint32_t " << t.prefix << "checks[] = {";
         for (const auto &[at, value] : t.checks) table << std::format("{}, {}, ", hex(at), hex(value));
         table << "};\n\n";
-        modules << std::format("    {{\"{}\", {}, {}checks, {}u, {}units, {}u}},\n", t.name, hex(t.size), t.prefix, t.checks.size(), t.prefix, rows.size());
+        modules << std::format("    {{\"{}\", {}, {}, {}checks, {}u, {}units, {}u}},\n", t.name, hex(t.fixed_base), hex(t.size), t.prefix, t.checks.size(), t.prefix, rows.size());
         ++module_count;
     }
     header << "}\n";
