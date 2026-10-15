@@ -29,6 +29,7 @@ void read_to_ee(std::uint32_t sector, std::uint32_t count, std::uint32_t dst) {
     disc::read(sector, count, data.data());
     const std::uint32_t at = dst & (ps2::kRamSize - 1);
     std::memcpy(ps2::g_ram + at, data.data(), std::min<std::size_t>(data.size(), ps2::kRamSize - at));
+    ps2::watch_span(at, static_cast<std::uint32_t>(std::min<std::size_t>(data.size(), ps2::kRamSize - at)), "cdvd:read");
 }
 
 }
