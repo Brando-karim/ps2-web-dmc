@@ -216,7 +216,7 @@ bool halted() { return g_halted; }
 namespace {
 
 constexpr char kStateMagic[8] = {'P', 'S', '2', 'S', 'T', 'A', 'T', 'E'};
-constexpr std::uint32_t kStateVersion = 3;
+constexpr std::uint32_t kStateVersion = 2;
 
 std::function<void()> event_action(int id, std::uint64_t at) {
     if (id == hw::kEventVblank) return vblank;
@@ -241,8 +241,7 @@ void machine_state(state::Stream &s) {
     std::uint32_t version = kStateVersion;
     s.pod(version);
     if (std::memcmp(magic, kStateMagic, sizeof magic) != 0) throw std::runtime_error("not a state file");
-    if (version != kStateVersion && !(s.loading() && version == 2)) throw std::runtime_error("state file from another version");
-    s.set_version(version);
+    if (version != kStateVersion) throw std::runtime_error("state file from another version");
     s.tag("ee");
     s.pod(g_cpu);
     s.bytes(g_ram, kRamSize);

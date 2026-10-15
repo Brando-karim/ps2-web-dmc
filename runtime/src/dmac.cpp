@@ -426,20 +426,12 @@ void write(std::uint32_t a, std::uint32_t v) {
         switch (a - kBase[ch]) {
         case 0x00: {
             const bool was = c.chcr & 0x100u;
-            if (was) {
-                if (!(v & 0x100u)) {
-                    c.chcr &= ~0x100u;
-                    c.paused = false;
-                    if (ch == 1) g_mfifo_waiting = false;
-                }
-                break;
-            }
-            c.chcr = (v & 0xFFFFu) | (c.chcr & 0xFFFF0000u);
+            c.chcr = v;
             if (!(v & 0x100u)) {
                 c.paused = false;
                 if (ch == 1) g_mfifo_waiting = false;
             }
-            if (v & 0x100u) start(ch);
+            if (!was && (v & 0x100u)) start(ch);
             break;
         }
         case 0x10: c.madr = v; break;

@@ -19,8 +19,6 @@ public:
     virtual ~Stream() = default;
     bool saving() const { return saving_; }
     bool loading() const { return !saving_; }
-    void set_version(std::uint32_t v) { version_ = v; }
-    std::uint32_t version() const { return version_; }
     virtual void bytes(void *data, std::size_t size) = 0;
 
     template <typename T>
@@ -148,7 +146,6 @@ public:
 
 private:
     bool saving_;
-    std::uint32_t version_{};
 };
 
 class Writer : public Stream {

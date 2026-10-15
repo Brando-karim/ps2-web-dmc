@@ -73,8 +73,6 @@ std::map<std::uint32_t, Server> g_servers;
 std::map<std::uint32_t, PendingBind> g_binds;
 std::map<std::uint32_t, Call> g_held_calls;
 std::map<std::uint32_t, std::deque<Request>> g_requests;
-std::map<std::uint32_t, Request> g_next_requests;
-std::map<int, std::uint32_t> g_exec_returns;
 std::map<std::uint32_t, int> g_queue_threads;
 std::map<std::uint32_t, CmdHandler> g_cmd_handlers;
 std::uint32_t g_sreg[32] = {};
@@ -119,17 +117,9 @@ void deliver_request(std::uint32_t queue) {
     auto t = g_queue_threads.find(queue);
     if (t == g_queue_threads.end()) return;
     iop::kernel::Thread *th = iop::kernel::thread(t->second);
-    if (!th) return;
-    if (th->status == iop::kernel::kWait && th->wait == iop::kernel::kWaitRpc) {
+    if (th && th->status == iop::kernel::kWait && th->wait == iop::kernel::kWaitRpc) {
         iop::kernel::wake(*th, 0);
         iop::kernel::reschedule();
-    } else if (th->rpc_queue != queue) {
-        if (th->status == iop::kernel::kWait && th->wait == iop::kernel::kWaitSleep) {
-            iop::kernel::wake(*th, 0);
-            iop::kernel::reschedule();
-        } else {
-            ++th->wakeups;
-        }
     }
 }
 
@@ -344,13 +334,7 @@ void rpc_finish(iop::Cpu &c) {
             std::memcpy(g_ram + (call.recv & (kRamSize - 1)), iop::ram_ptr(result), (call.recv_size + 3u) & ~3u);
         reply_call(call);
     }
-    const auto back = g_exec_returns.find(t->id);
-    if (back != g_exec_returns.end()) {
-        c.pc = back->second;
-        g_exec_returns.erase(back);
-    } else {
-        c.pc = g_loop_stub;
-    }
+    c.pc = g_loop_stub;
     c.npc = c.pc + 4;
 }
 
@@ -465,34 +449,6 @@ void install_iop_side() {
     def("sifcmd", 19, "sceSifSetRpcQueue", [](iop::Cpu &c) {
         g_queue_threads[arg(c, 0)] = static_cast<int>(arg(c, 1));
         c.r[2] = 0;
-    });
-    def("sifcmd", 20, "sceSifGetNextRequest", [](iop::Cpu &c) {
-        auto &queue = g_requests[arg(c, 0)];
-        if (queue.empty()) { c.r[2] = 0; return; }
-        Request request = std::move(queue.front());
-        queue.pop_front();
-        const std::uint32_t sd = g_servers[request.call.server_data ^ kServerXor].sd;
-        g_next_requests[sd] = std::move(request);
-        c.r[2] = sd;
-    });
-    def("sifcmd", 21, "sceSifExecRequest", [](iop::Cpu &c) {
-        iop::kernel::Thread *t = iop::kernel::current();
-        auto it = g_next_requests.find(arg(c, 0));
-        if (!t || it == g_next_requests.end()) { c.r[2] = 0; return; }
-        const Request request = std::move(it->second);
-        g_next_requests.erase(it);
-        const std::uint32_t server = request.call.server_data ^ kServerXor;
-        const Server &s = g_servers[server];
-        if (s.buf && !request.data.empty()) std::memcpy(iop::ram_ptr(s.buf), request.data.data(), request.data.size());
-        t->rpc_server = server;
-        g_held_calls[server] = request.call;
-        g_exec_returns[t->id] = c.r[31];
-        c.r[4] = request.call.rpc_number;
-        c.r[5] = s.buf;
-        c.r[6] = request.size;
-        c.r[31] = g_finish_stub;
-        c.pc = s.func;
-        c.npc = c.pc + 4;
     });
     def("sifcmd", 22, "sceSifRpcLoop", [](iop::Cpu &c) {
         iop::kernel::Thread *t = iop::kernel::current();
@@ -721,8 +677,6 @@ void reset() {
     g_binds.clear();
     g_held_calls.clear();
     g_requests.clear();
-    g_next_requests.clear();
-    g_exec_returns.clear();
     g_queue_threads.clear();
     g_cmd_handlers.clear();
     g_iop_clients.clear();
@@ -888,14 +842,6 @@ void state(ps2::state::Stream &s) {
             s.vec(r.data);
         });
     });
-    if (s.version() >= 3) {
-        s.map(g_next_requests, [&s](Request &r) {
-            s.pod(r.call);
-            s.pod(r.size);
-            s.vec(r.data);
-        });
-        s.map(g_exec_returns);
-    }
     s.map(g_queue_threads);
     s.map(g_cmd_handlers);
     s.pod(g_sreg);
