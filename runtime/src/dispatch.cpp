@@ -24,6 +24,9 @@ constexpr std::uint32_t kModuleMagic = 0x32524E53u;
 struct Instance {
     std::uint32_t base;
     const ModuleInfo *module;
+    // One word that tells the image found here is still the one found before;
+    // the full checks read too much to pay on every call into the module.
+    std::uint32_t spot_at, spot_value;
 };
 
 const ModuleInfo *g_modules = nullptr;
@@ -42,11 +45,20 @@ bool loaded_at(const ModuleInfo &m, std::uint32_t base) {
     return true;
 }
 
+const Instance *in_place(const Instance &i) {
+    return ld32(i.base + i.spot_at) == i.spot_value ? &i : nullptr;
+}
+
+Instance make_instance(std::uint32_t base, const ModuleInfo *m) {
+    const bool any = m->check_count != 0;
+    return {base, m, any ? m->checks[0] : 0, any ? m->checks[1] : 0};
+}
+
 const Instance *instance_for(std::uint32_t pc) {
     for (std::size_t k = 0; k < g_instances.size(); ++k) {
         const Instance &i = g_instances[k];
         if (pc - i.base >= i.module->size) continue;
-        if (loaded_at(*i.module, i.base)) return &i;
+        if (in_place(i)) return &i;
         g_instances.erase(g_instances.begin() + static_cast<std::ptrdiff_t>(k));
         break;
     }
@@ -56,7 +68,7 @@ const Instance *instance_for(std::uint32_t pc) {
     for (std::uint32_t k = 0; k < g_module_count; ++k) {
         const ModuleInfo &m = g_modules[k];
         if (m.fixed_base && pc - m.fixed_base < m.size && loaded_at(m, m.fixed_base)) {
-            g_instances.push_back({m.fixed_base, &m});
+            g_instances.push_back(make_instance(m.fixed_base, &m));
             return &g_instances.back();
         }
     }
@@ -64,7 +76,7 @@ const Instance *instance_for(std::uint32_t pc) {
         if (ld32(at) == kModuleMagic) {
             for (std::uint32_t k = 0; k < g_module_count; ++k)
                 if (pc - at < g_modules[k].size && loaded_at(g_modules[k], at)) {
-                    g_instances.push_back({at, &g_modules[k]});
+                    g_instances.push_back(make_instance(at, &g_modules[k]));
                     return &g_instances.back();
                 }
             return nullptr;
