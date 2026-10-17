@@ -33,8 +33,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             path = '/ps2web.html'
         if path == '/disc.iso':
             return DISC
+        if path.endswith('/'):
+            path += 'index.html'
         name = os.path.normpath(path.lstrip('/'))
-        if name.startswith('..') or os.sep in name:
+        if name.startswith('..') or name == '.':
             return None
         full = os.path.join(BUILD, name)
         return full if os.path.isfile(full) else None
