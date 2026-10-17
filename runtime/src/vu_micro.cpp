@@ -805,6 +805,7 @@ void run_entry(int unit, std::uint32_t pc);
 
 bool g_chaining = false;
 std::int64_t g_chained = -1;
+std::uint64_t g_last_key = 0;
 
 void interpret(int unit, std::uint32_t pc) {
     if (unit == 1 && g_capture) {
@@ -839,6 +840,49 @@ void run_entry(int unit, std::uint32_t pc) {
             ++compiled;
             const ProgramFn jit = g_entries[(pc & 16383u) >> 3].jit;
             static std::uint64_t sampled = 0;
+            static const bool check_vs_interpreter = std::getenv("PS2_VU_CHECK") != nullptr;
+            static bool checking = false;
+            if (check_vs_interpreter && !checking && ++sampled % 64 == 0) {
+                // The interpreter is the reference: run the compiled function
+                // and, from the same state, the interpreter, and report the
+                // first registers or memory they disagree on.
+                static std::uint64_t checked = 0, mismatches = 0;
+                static std::uint8_t before_mem[16384], run_mem[16384];
+                const Vu0Regs before = g_vu1;
+                std::memcpy(before_mem, g_vu1_mem, sizeof before_mem);
+                std::int64_t escape = -1;
+                const std::uint64_t key = program_key(g_vu1_code, reachable(g_vu1_code, 16383u, pc & 16383u), pc & 16383u);
+                g_capture = &escape;
+                fn(g_vu1, g_vu1_mem);
+                g_capture = nullptr;
+                const Vu0Regs after = g_vu1;
+                std::memcpy(run_mem, g_vu1_mem, sizeof run_mem);
+                g_vu1 = before;
+                std::memcpy(g_vu1_mem, before_mem, sizeof g_vu1_mem);
+                checking = true;
+                interpret(1, pc);
+                checking = false;
+                if (escape < 0 && (std::memcmp(&after, &g_vu1, sizeof after) != 0 || std::memcmp(run_mem, g_vu1_mem, sizeof run_mem) != 0)) {
+                    if (++mismatches <= 20) {
+                        int vf = -1;
+                        for (int i = 0; i < 32 && vf < 0; ++i)
+                            if (std::memcmp(&after.vf[i], &g_vu1.vf[i], 16) != 0) vf = i;
+                        int vi = -1;
+                        for (int i = 0; i < 16 && vi < 0; ++i)
+                            if (after.vi[i] != g_vu1.vi[i]) vi = i;
+                        std::uint32_t word = ~0u;
+                        for (int i = 0; i < 16384 && word == ~0u; ++i) word = run_mem[i] ^ g_vu1_mem[i] ? i : ~0u;
+                        std::fprintf(stderr, "[vu-check] key %016llX entry %04X call %llu: vf%d vi%d q/p/i/r %d flags %d mem %d\n", static_cast<unsigned long long>(key),
+                                     pc & 16383u, static_cast<unsigned long long>(checked), vf, vi,
+                                     after.q != g_vu1.q || after.p != g_vu1.p || after.i != g_vu1.i || after.r != g_vu1.r,
+                                     after.mac != g_vu1.mac || after.status != g_vu1.status || after.clip != g_vu1.clip, word == ~0u ? -1 : static_cast<int>(word));
+                    }
+                }
+                ++checked;
+                g_vu1 = after;
+                std::memcpy(g_vu1_mem, run_mem, sizeof g_vu1_mem);
+                return;
+            }
             if (jit && jit != fn && ++sampled % 32 == 0) check_jit(fn, jit);
             else fn(g_vu1, g_vu1_mem);
             return;
@@ -858,6 +902,7 @@ void run_entry(int unit, std::uint32_t pc) {
 
 ProgramFn lookup(std::uint32_t address) {
     EntryCache &e = g_entries[(address & 16383u) >> 3];
+    g_last_key = 0;
     if (e.generation == g_generation[1]) return e.function;
     e.generation = g_generation[1];
     for (const Candidate &c : e.candidates)
@@ -868,6 +913,7 @@ ProgramFn lookup(std::uint32_t address) {
         }
     const std::vector<std::uint32_t> pcs = reachable(g_vu1_code, 16383u, address);
     const std::uint64_t key = program_key(g_vu1_code, pcs, address & 16383u);
+    g_last_key = key;
     const auto it = g_programs.find(key);
     e.function = it == g_programs.end() ? nullptr : it->second;
     e.jit = nullptr;

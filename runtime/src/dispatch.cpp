@@ -24,9 +24,6 @@ constexpr std::uint32_t kModuleMagic = 0x32524E53u;
 struct Instance {
     std::uint32_t base;
     const ModuleInfo *module;
-    // One word that tells the image found here is still the one found before;
-    // the full checks read too much to pay on every call into the module.
-    std::uint32_t spot_at, spot_value;
 };
 
 const ModuleInfo *g_modules = nullptr;
@@ -45,13 +42,20 @@ bool loaded_at(const ModuleInfo &m, std::uint32_t base) {
     return true;
 }
 
+// The word a call checks turns with each call, so every translated code word
+// is proven again within check_count calls: one word per call keeps calls
+// cheap while even a one word change of the image is caught in time.
+std::uint32_t g_spot_cursor = 0;
+
 const Instance *in_place(const Instance &i) {
-    return ld32(i.base + i.spot_at) == i.spot_value ? &i : nullptr;
+    if (std::getenv("PS2_WINDOW_FULL")) return loaded_at(*i.module, i.base) ? &i : nullptr;
+    if (!i.module->check_count) return &i;
+    const std::uint32_t c = g_spot_cursor++ % i.module->check_count;
+    return ld32(i.base + i.module->checks[2 * c]) == i.module->checks[2 * c + 1] ? &i : nullptr;
 }
 
 Instance make_instance(std::uint32_t base, const ModuleInfo *m) {
-    const bool any = m->check_count != 0;
-    return {base, m, any ? m->checks[0] : 0, any ? m->checks[1] : 0};
+    return {base, m};
 }
 
 const Instance *instance_for(std::uint32_t pc) {
