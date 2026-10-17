@@ -687,12 +687,14 @@ std::unordered_map<std::uint64_t, ProgramFn> g_programs;
 struct Candidate {
     std::vector<std::uint32_t> runs;
     std::vector<std::uint8_t> code;
+    std::uint64_t key = 0;
     ProgramFn function = nullptr;
     ProgramFn jit = nullptr;
 };
 
 struct EntryCache {
     std::uint32_t generation = 0;
+    std::uint64_t key = 0;
     ProgramFn function = nullptr;
     ProgramFn jit = nullptr;
     std::vector<Candidate> candidates;
@@ -831,12 +833,22 @@ void interpret(int unit, std::uint32_t pc) {
 }
 
 void run_entry(int unit, std::uint32_t pc) {
-    static const bool interpret_only = std::getenv("PS2_VU_INTERPRET") != nullptr;
+    // The compile of VU1 programs mistranslates at least three of them (PS2_VU_CHECK
+// names them and diverges on vf/vi/q and micro memory), and the interpreter
+// serves the games right everywhere it was compared, so until the compiler
+// fault itself is fixed the safe default is to interpret. PS2_VU_JIT=1 opts a
+// port back into the compiled programs to find the faults faster.
+    static const bool interpret_only = !std::getenv("PS2_VU_JIT");
     static const bool count = std::getenv("PS2_VU_COUNT") != nullptr;
     static std::uint64_t compiled = 0, interpreted = 0;
     static std::unordered_map<std::uint32_t, std::uint64_t> misses;
+    // Programs whose compiled form PS2_VU_CHECK showed diverging from the
+    // interpreter, with state the interpreter serves right; their compiled
+    // functions stay unused until the compiler fault they expose is fixed.
+    static const std::unordered_set<std::uint64_t> kSuspects{0x4A2C985BE015965Cull, 0x93C6540607E7215Dull};
     if (unit == 1 && !interpret_only) {
-        if (const ProgramFn fn = lookup(pc)) {
+        const ProgramFn fn = lookup(pc);
+        if (fn && !kSuspects.count(g_entries[(pc & 16383u) >> 3].key)) {
             ++compiled;
             const ProgramFn jit = g_entries[(pc & 16383u) >> 3].jit;
             static std::uint64_t sampled = 0;
@@ -909,11 +921,13 @@ ProgramFn lookup(std::uint32_t address) {
         if (candidate_matches(c)) {
             e.function = c.function;
             e.jit = c.jit;
+            e.key = c.key;
             return e.function;
         }
     const std::vector<std::uint32_t> pcs = reachable(g_vu1_code, 16383u, address);
     const std::uint64_t key = program_key(g_vu1_code, pcs, address & 16383u);
     g_last_key = key;
+    e.key = key;
     const auto it = g_programs.find(key);
     e.function = it == g_programs.end() ? nullptr : it->second;
     e.jit = nullptr;
@@ -921,6 +935,7 @@ ProgramFn lookup(std::uint32_t address) {
     if (jit_mode == 2 || (jit_mode >= 1 && !e.function)) e.function = jit_program(key, address);
     else if (jit_mode == 3) e.jit = jit_program(key, address);
     Candidate c = make_candidate(pcs);
+    c.key = key;
     c.function = e.function;
     c.jit = e.jit;
     if (e.candidates.size() < 8) e.candidates.push_back(std::move(c));
