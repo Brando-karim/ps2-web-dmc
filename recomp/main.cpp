@@ -216,6 +216,7 @@ int main(int argc, char **argv) {
         std::map<std::string, std::set<std::uint32_t>> window_offsets;
         std::map<std::uint32_t, std::vector<std::pair<std::string, std::vector<std::pair<std::uint32_t, std::uint32_t>>>>> code_signatures;
         std::set<std::string> representatives;
+        std::set<std::uint32_t> called_out;
         for (const Snr2Module &o : overlays) {
             if (!window_seeds.count(o.base)) window_seeds[o.base] = window_entries(image, program, o.base, o.size);
             if (const auto it = entries.modules.find(o.name); it != entries.modules.end())
@@ -255,6 +256,21 @@ int main(int argc, char **argv) {
             overlay_code += code_size(programs.back());
             translations.push_back({&images.back(), &programs.back(), nullptr, "m_" + o.name + "_", false, o.name, o.size,
                                     checks_for_window(o, programs.back()), true, o.base});
+            for (std::uint32_t pc = o.base; pc < o.base + o.size; pc += 4) {
+                if (!programs.back().is_code(pc)) continue;
+                const Insn i = decode(*images.back().word(pc), pc);
+                const Flow f = flow(i.op);
+                const std::uint32_t t = i.jump_target();
+                if ((f == Flow::Jump || f == Flow::Call) && t >= program.base && t < program.end && !program.entries.count(t)) called_out.insert(t);
+            }
+        }
+        // Window code jumps into the program at places the program may reach
+        // only through pointers, if at all: entry points of it all the same.
+        if (!called_out.empty()) {
+            std::vector<std::uint32_t> seeds = entries.main;
+            seeds.insert(seeds.end(), called_out.begin(), called_out.end());
+            program = analyse(image, seeds, dynamic_sites(imports));
+            std::printf("%zu entry points of the program called from code windows\n", called_out.size());
         }
         if (!overlays.empty()) {
             std::size_t called_entries = 0;

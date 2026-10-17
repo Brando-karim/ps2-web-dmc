@@ -7,6 +7,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -791,10 +792,12 @@ void generate(const std::vector<Translation> &translations, const CodegenOptions
     header << "#pragma once\n\n#include \"ps2/generated.hpp\"\n\nnamespace gen {\n";
     table << "#include \"units.hpp\"\n\nnamespace gen {\n\n";
     std::size_t written = 0, main_units = 0, module_count = 0;
+    std::vector<std::string> unit_names;
     for (const Translation &t : translations) {
         const std::vector<UnitRow> rows = Generator(t, options).run();
         written += rows.size();
         for (const UnitRow &r : rows) {
+            unit_names.push_back(r.function);
             header << "void " << r.function << "(ps2::Cpu &c, std::uint32_t entry, std::uint32_t depth);\n";
             header << "extern const std::uint16_t " << r.table << "[];\n";
         }
@@ -819,6 +822,15 @@ void generate(const std::vector<Translation> &translations, const CodegenOptions
     table << " }\n";
     write_if_changed(fs::path(options.output) / "units.hpp", header.str());
     write_if_changed(fs::path(options.output) / "table.cpp", table.str());
+    // Units of an earlier translation that this one no longer has (a module
+    // regrouped under a new name, a smaller image) would still be built.
+    std::set<std::string> kept;
+    for (const std::string &name : unit_names) kept.insert(name + ".cpp");
+    static const std::regex unit_file("(m_.*_)?unit_[0-9A-F]{4}\\.cpp");
+    for (const auto &entry : fs::directory_iterator(options.output)) {
+        const std::string file = entry.path().filename().string();
+        if (std::regex_match(file, unit_file) && !kept.contains(file)) fs::remove(entry.path());
+    }
     std::printf("%zu units written to %s\n", written, options.output.c_str());
 }
 
