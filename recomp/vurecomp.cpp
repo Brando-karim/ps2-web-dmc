@@ -1,6 +1,7 @@
 #include "ps2/vu_ops.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -473,11 +474,18 @@ std::string local_vi(std::string o) {
     return o;
 }
 
+// The integer register a lower instruction's code writes, or -1.
+int vi_written(const std::string &code) {
+    const std::size_t at = code.find("set_vi(r, ");
+    if (at == std::string::npos) return -1;
+    return std::atoi(code.c_str() + at + 10);
+}
+
 std::string generate(const Program &p, std::string &name) {
     const std::vector<std::uint32_t> pcs = ps2::vu::reachable(p.code.data(), kMask, p.entry);
     std::set<std::uint32_t> in(pcs.begin(), pcs.end());
     std::map<std::uint32_t, Lower> lowers;
-    bool any_status = false, any_flags = false, any_q = false;
+    bool any_status = false, any_q = false;
     for (std::uint32_t pc : pcs) {
         const std::uint32_t lo = word(p.code, pc), hi = word(p.code, pc + 4);
         Lower l;
@@ -485,7 +493,6 @@ std::string generate(const Program &p, std::string &name) {
         for (const std::uint32_t latency : {7u, 13u})
             replace_all(l.code, std::format("fl.end_q(r, qb, {}u)", latency), std::format("fl.end_q(r, qb, {}u)", ps2::vu::q_delay(p.code.data(), kMask, pc, latency)));
         any_status = any_status || l.reads_status;
-        any_flags = any_flags || l.reads_flags;
         any_q = any_q || l.code.find("fl.end_q(") != std::string::npos;
         lowers[pc] = l;
     }
@@ -526,7 +533,7 @@ std::string generate(const Program &p, std::string &name) {
     for (std::uint32_t pc : pcs)
         for (int reg : upper(word(p.code, pc + 4), true).shadow_reads) shadowed.insert(reg);
     name = std::format("vu1_{:016X}", p.key);
-    std::string o = std::format("void {}(Vu0Regs &r, std::uint8_t *mem) {{\n    FlagPipe fl;\n    fl.start(r);\n    bool pend = false, pendj = false, ending = false;\n    std::uint32_t jpc = 0;\n    (void)pend;\n    (void)pendj;\n    (void)ending;\n    (void)jpc;\n",
+    std::string o = std::format("void {}(Vu0Regs &r, std::uint8_t *mem) {{\n    FlagPipe fl;\n    fl.start(r);\n    bool pend = false, pendj = false, ending = false;\n    std::uint32_t jpc = 0;\n    std::uint16_t bk = 0, next_bk = 0;\n    unsigned bi = 0, next_bi = 0;\n    (void)pend;\n    (void)pendj;\n    (void)ending;\n    (void)jpc;\n    (void)bk;\n    (void)next_bk;\n    (void)bi;\n    (void)next_bi;\n",
                                 name);
     for (int reg : shadowed) o += std::format("    v4u {} = vfix(vload({}));\n", shadow(reg), raw(reg));
     o += std::format("    goto {};\n", label(p.entry & kMask));
@@ -534,12 +541,23 @@ std::string generate(const Program &p, std::string &name) {
         const std::uint32_t lo = word(p.code, pc), hi = word(p.code, pc + 4);
         bool out_live = false;
         for (std::int64_t s : successors(pc)) out_live = out_live || s < 0 || !in.count(static_cast<std::uint32_t>(s)) || live_in[static_cast<std::uint32_t>(s)];
-        const Upper u = upper(hi, any_status ? true : (any_flags && out_live));
+        const Upper u = upper(hi, any_status || out_live);
         const Lower &l = lowers[pc];
-        std::string body = u.pre;
+        // Save the VI write for the next executed instruction, including
+        // taken branches. Branch operands use the previous instruction's view.
+        const int written = (hi & 0x80000000u) || ps2::vu::branch_delay_exempt(lo) ? -1 : vi_written(l.code);
+        std::string body = "next_bi = 0; ";
+        if (written > 0) body += std::format("next_bk = r.vi[{}]; next_bi = {}; ", written, written);
+        body += u.pre;
+        std::string lcode = l.code;
+        if (l.branch || l.jump) {
+            for (int reg = 1; reg < 16; ++reg)
+                replace_all(lcode, std::format("r.vi[{}]", reg), std::format("(bi == {} ? bk : r.vi[{}])", reg, reg));
+        }
         if (hi & 0x80000000u) body += std::format("r.i = {}u; ", lo);
         else if (!l.supported) body += std::format("vu::interpret(1, {}u); return; ", pc);
-        else body += l.code;
+        else body += lcode;
+        body += "bk = next_bk; bi = next_bi; ";
         body += u.post;
         o += std::format("{}: {{ ++fl.t; ", label(pc));
         if (any_q && ps2::vu::reads_q(hi)) {

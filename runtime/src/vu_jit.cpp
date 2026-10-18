@@ -30,7 +30,7 @@ constexpr ImportType kImportTypes[kImports] = {
 };
 
 enum Local : std::uint32_t {
-    kR, kMem, kPend, kPendj, kEnding, kJpc, kPcw, kUclip, kUx, kUy, kUz, kUw, kTmp, kTmp2, kMacv, kStat, kSlot, kI32Locals,
+    kR, kMem, kPend, kPendj, kEnding, kJpc, kPcw, kUclip, kUx, kUy, kUz, kUw, kTmp, kTmp2, kMacv, kStat, kSlot, kBranchReg, kBranchValue, kNextBranchReg, kNextBranchValue, kI32Locals,
     kUv = kI32Locals, kV0, kV1, kV2, kV3, kV4, kV5, kShadow0
 };
 constexpr std::uint32_t kI32Count = kI32Locals - 2;
@@ -452,8 +452,26 @@ private:
         c_.load16(vi_off(i));
     }
 
+    void branch_vi(unsigned i) {
+        if (!i) { c_.i32c(0); return; }
+        c_.get(kBranchValue);
+        vi(i);
+        c_.get(kBranchReg);
+        c_.i32c(i);
+        c_.op(kOpEq);
+        c_.op(kOpSelect);
+    }
+
+    bool delay_vi_ = false;
+
     template <typename F>
     void set_vi(unsigned i, F value) {
+        if (i && delay_vi_) {
+            vi(i);
+            c_.set(kNextBranchValue);
+            c_.i32c(i);
+            c_.set(kNextBranchReg);
+        }
         if (i) c_.get(kR);
         value();
         if (i) c_.store16(vi_off(i));
@@ -1212,7 +1230,7 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
         break;
     case 0x24:
     case 0x25:
-        vi(is);
+        branch_vi(is);
         c_.i32c(8);
         c_.op(kOpMul);
         c_.i32c(kMask);
@@ -1224,14 +1242,14 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
         break;
     case 0x28:
     case 0x29:
-        vi(is);
-        vi(it);
+        branch_vi(is);
+        branch_vi(it);
         c_.op((w >> 25) == 0x28 ? kOpEq : kOpNe);
         c_.set(kPend);
         break;
     case 0x2C: case 0x2D: case 0x2E: case 0x2F: {
         static const std::uint8_t kCompare[4] = {kOpLtS, kOpGtS, kOpLeS, kOpGeS};
-        vi(is);
+        branch_vi(is);
         c_.op(kOpExt16);
         c_.i32c(0);
         c_.op(kCompare[(w >> 25) - 0x2C]);
@@ -1247,12 +1265,11 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
     pcs_ = reachable(code_, kMask, entry_);
     if (pcs_.empty()) return false;
     in_.insert(pcs_.begin(), pcs_.end());
-    bool any_status = false, any_flags = false;
+    bool any_status = false;
     for (std::uint32_t pc : pcs_) {
         LowerInfo l;
         if (!(word(pc + 4) & 0x80000000u)) l = analyze_lower(word(pc), pc);
         any_status = any_status || l.reads_status;
-        any_flags = any_flags || l.reads_flags;
         lowers_[pc] = l;
     }
     for (std::uint32_t pc : pcs_) live_in_[pc] = false;
@@ -1317,7 +1334,7 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
         const std::uint32_t pc = pcs_[k];
         const std::uint32_t lo = word(pc), hi = word(pc + 4);
         const Up u = decode_upper(hi);
-        const bool flags_live = any_status ? true : (any_flags && out_live(pc));
+        const bool flags_live = any_status || out_live(pc);
         const LowerInfo &li = lowers_[pc];
 
         fl();
@@ -1333,6 +1350,10 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
                 c_.call(kind == kQNew ? kFlushQ : kSyncQ);
             }
         }
+        c_.i32c(0);
+        c_.set(kNextBranchReg);
+        // Flag reads write VI without the branch operand delay.
+        delay_vi_ = !branch_delay_exempt(lo);
         upper_pre(u, flags_live);
         if (hi & 0x80000000u) {
             c_.get(kR);
@@ -1343,6 +1364,10 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
             c_.i32c(pc);
             c_.tail(kInterpret);
         }
+        c_.get(kNextBranchReg);
+        c_.set(kBranchReg);
+        c_.get(kNextBranchValue);
+        c_.set(kBranchValue);
         upper_post(u, flags_live);
         const int lower_write = (hi & 0x80000000u) || !li.supported ? -1 : li.writes;
         if (lower_write >= 0 && shadow_.count(lower_write)) {

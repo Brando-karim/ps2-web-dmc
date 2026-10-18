@@ -29,6 +29,13 @@ struct Program {
 void register_programs(const Program *programs, std::uint32_t count);
 
 inline std::uint32_t lower_major(std::uint32_t lo) { return lo >> 25; }
+// Flag reads bypass the one-instruction VI delay seen by branch operands.
+inline bool branch_delay_exempt(std::uint32_t lo) {
+    switch (lower_major(lo)) {
+    case 0x10: case 0x12: case 0x13: case 0x14: case 0x16: case 0x17: case 0x18: case 0x1A: case 0x1B: case 0x1C: return true;
+    default: return false;
+    }
+}
 inline bool is_branch(std::uint32_t lo) {
     const std::uint32_t op = lower_major(lo);
     return op == 0x20 || op == 0x21 || op == 0x24 || op == 0x25 || (op >= 0x28 && op <= 0x2F && op != 0x2A && op != 0x2B);
