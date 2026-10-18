@@ -63,7 +63,7 @@ int main(int argc, char **argv) {
         std::string name;
         native << generate(p, name);
         std::vector<std::uint8_t> wasm;
-        if (!ps2::vu::jit::translate(p.code.data(), 0, {0x1000, 0x2000}, wasm)) return 1;
+        if (!ps2::vu::jit::translate(p.code.data(), 0, {0x1000}, wasm)) return 1;
         std::ofstream(out / std::format("{}.wasm", test), std::ios::binary).write(reinterpret_cast<const char *>(wasm.data()), wasm.size());
     }
     native << "int main() {\n";
@@ -101,10 +101,8 @@ for (let test = 0; test < 8; ++test) {
     if (imp.kind !== 'function') continue;
     env[imp.name] = () => { throw Error(`Unexpected import: ${imp.name}`); };
   }
-  // These fixtures need only start, clip reads and flushing an idle Q pipe.
-  env.start = () => {};
+  // The JIT initializes its pipelines inline; only FCAND needs an import.
   env.clip = () => 1;
-  env.flush_q = () => {};
   new WebAssembly.Instance(mod, {env}).exports.run(r, 0x4000);
   if (test >= 6) {
     if (view.getUint32(r + off.tpc, true) !== 16) throw Error(`Register jump regression ${test}`);

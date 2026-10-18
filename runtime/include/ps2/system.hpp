@@ -19,6 +19,7 @@ struct Press {
     std::uint64_t frame;
     std::uint32_t frames;
     std::uint16_t buttons;
+    std::uint8_t stick = 0;
 };
 
 struct AxisPress {

@@ -116,7 +116,8 @@ std::vector<std::uint32_t> address_constants(const Image &image, const Program &
         if (!p.is_code(pc)) continue;
         const Insn lui = decode(*image.word(pc), pc);
         if (lui.op != Op::Lui) continue;
-        std::uint32_t stop = pc + 160;
+        const bool saved = (lui.rt() >= 16 && lui.rt() <= 23) || lui.rt() == 30;
+        std::uint32_t stop = pc + (saved ? 1024 : 160);
         for (std::uint32_t next = pc + 4; next < stop && p.is_code(next); next += 4) {
             const Insn insn = decode(*image.word(next), next);
             if ((insn.op == Op::Addiu || insn.op == Op::Ori) && insn.rs() == lui.rt()) {

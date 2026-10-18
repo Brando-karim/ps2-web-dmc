@@ -3,6 +3,7 @@
 #include "ps2/vu_ops.hpp"
 
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <set>
@@ -10,8 +11,7 @@
 namespace ps2::vu::jit {
 
 const char *const kImportNames[kImports] = {
-    "clip_value", "clip_post", "set_clip", "start", "mac", "status", "clip", "force_mac", "mul", "msub", "to_fixed", "from_fixed",
-    "div", "sqrt", "rsqrt", "efu", "kick", "top", "itop", "rand_next", "interpret", "sync_q", "flush_q",
+    "mac", "status", "clip", "force_mac", "efu", "kick", "top", "itop", "interpret",
 };
 
 namespace {
@@ -25,13 +25,12 @@ struct ImportType {
 };
 
 constexpr ImportType kImportTypes[kImports] = {
-    {3, true}, {3, false}, {3, false}, {2, false}, {1, true}, {1, true}, {1, true}, {2, false}, {2, true}, {3, true}, {2, true}, {2, true},
-    {4, false}, {3, false}, {4, false}, {4, false}, {1, false}, {0, true}, {0, true}, {1, true}, {2, false}, {1, false}, {1, false},
+    {1, true}, {1, true}, {1, true}, {2, false}, {4, false}, {1, false}, {0, true}, {0, true}, {2, false},
 };
 
 enum Local : std::uint32_t {
-    kR, kMem, kPend, kPendj, kEnding, kJpc, kPcw, kUclip, kUx, kUy, kUz, kUw, kTmp, kTmp2, kMacv, kStat, kSlot, kBranchReg, kBranchValue, kNextBranchReg, kNextBranchValue, kI32Locals,
-    kUv = kI32Locals, kV0, kV1, kV2, kV3, kV4, kV5, kShadow0
+    kR, kMem, kPend, kPendj, kEnding, kJpc, kPcw, kExit, kUclip, kTmp, kTmp2, kMacv, kStat, kSlot, kT, kSign, kExp, kBranchReg, kBranchValue, kNextBranchReg, kNextBranchValue, kVi0, kI32Locals = kVi0 + 16,
+    kBits = kI32Locals, kUv, kV0, kV1, kV2, kV3, kV4, kV5, kShadow0
 };
 constexpr std::uint32_t kI32Count = kI32Locals - 2;
 constexpr std::uint32_t kVecTemps = kShadow0 - kUv;
@@ -43,8 +42,10 @@ std::uint32_t reg_off(int reg) { return reg == kAcc ? static_cast<std::uint32_t>
 std::uint32_t vi_off(unsigned i) { return static_cast<std::uint32_t>(offsetof(Vu0Regs, vi) + i * 2u); }
 constexpr std::uint32_t kOffQ = offsetof(Vu0Regs, q), kOffP = offsetof(Vu0Regs, p), kOffI = offsetof(Vu0Regs, i), kOffR = offsetof(Vu0Regs, r);
 constexpr std::uint32_t kOffMac = offsetof(Vu0Regs, mac);
-constexpr std::uint32_t kOffMh = offsetof(vuops::FlagPipe, mh), kOffMacTs = offsetof(vuops::FlagPipe, mac_ts), kOffMacV = offsetof(vuops::FlagPipe, mac_v),
-                        kOffStatusV = offsetof(vuops::FlagPipe, status_v), kOffT = offsetof(vuops::FlagPipe, t);
+constexpr std::uint32_t kOffMh = offsetof(vuops::FlagPipe, mh), kOffCh = offsetof(vuops::FlagPipe, ch), kOffMacTs = offsetof(vuops::FlagPipe, mac_ts),
+                        kOffMacV = offsetof(vuops::FlagPipe, mac_v), kOffStatusV = offsetof(vuops::FlagPipe, status_v), kOffClipTs = offsetof(vuops::FlagPipe, clip_ts),
+                        kOffClipV = offsetof(vuops::FlagPipe, clip_v), kOffT = offsetof(vuops::FlagPipe, t), kOffQPending = offsetof(vuops::FlagPipe, q_pending),
+                        kOffQValue = offsetof(vuops::FlagPipe, q_value), kOffQReady = offsetof(vuops::FlagPipe, q_ready);
 constexpr std::uint32_t kOffStatus = offsetof(Vu0Regs, status), kOffClip = offsetof(Vu0Regs, clip), kOffTpc = offsetof(Vu0Regs, tpc);
 
 bool lane(unsigned dest, int i) { return dest & (8u >> i); }
@@ -61,6 +62,17 @@ struct Out {
         } while (v);
     }
     void s32(std::int32_t v) {
+        for (;;) {
+            const std::uint8_t c = static_cast<std::uint8_t>(v & 0x7F);
+            v >>= 7;
+            if ((v == 0 && !(c & 0x40)) || (v == -1 && (c & 0x40))) {
+                b.push_back(c);
+                return;
+            }
+            b.push_back(c | 0x80u);
+        }
+    }
+    void s64(std::int64_t v) {
         for (;;) {
             const std::uint8_t c = static_cast<std::uint8_t>(v & 0x7F);
             v >>= 7;
@@ -92,6 +104,10 @@ struct Code : Out {
         byte(0x41);
         s32(static_cast<std::int32_t>(v));
     }
+    void i64c(std::uint64_t v) {
+        byte(0x42);
+        s64(static_cast<std::int64_t>(v));
+    }
     void get(std::uint32_t l) {
         byte(0x20);
         u32(l);
@@ -109,6 +125,11 @@ struct Code : Out {
         u32(2);
         u32(off);
     }
+    void load8(std::uint32_t off) {
+        byte(0x2D);
+        u32(0);
+        u32(off);
+    }
     void load16(std::uint32_t off) {
         byte(0x2F);
         u32(1);
@@ -117,6 +138,11 @@ struct Code : Out {
     void store(std::uint32_t off) {
         byte(0x36);
         u32(2);
+        u32(off);
+    }
+    void store8(std::uint32_t off) {
+        byte(0x3A);
+        u32(0);
         u32(off);
     }
     void store16(std::uint32_t off) {
@@ -140,6 +166,10 @@ struct Code : Out {
             for (int k = 0; k < 4; ++k) byte(static_cast<std::uint8_t>(w >> (k * 8)));
     }
     void vsplatc(std::uint32_t v) { vconst(v, v, v, v); }
+    void shuffle(const std::uint8_t (&lanes)[16]) {
+        simd(0x0D);
+        for (std::uint8_t l : lanes) byte(l);
+    }
     void call(std::uint32_t f) {
         byte(0x10);
         u32(f);
@@ -161,14 +191,16 @@ struct Code : Out {
 };
 
 enum : std::uint8_t {
-    kOpDrop = 0x1A, kOpSelect = 0x1B, kOpEqz = 0x45, kOpEq = 0x46, kOpNe = 0x47, kOpLtS = 0x48, kOpGtS = 0x4A, kOpLeS = 0x4C, kOpGeS = 0x4E,
-    kOpAdd = 0x6A, kOpSub = 0x6B, kOpMul = 0x6C, kOpAnd = 0x71, kOpOr = 0x72, kOpXor = 0x73, kOpShl = 0x74, kOpShrU = 0x76, kOpExt16 = 0xC1,
-    kOpReturn = 0x0F, kOpBr = 0x0C, kOpUnreachable = 0x00,
+    kOpDrop = 0x1A, kOpSelect = 0x1B, kOpEq = 0x46, kOpNe = 0x47, kOpLtS = 0x48, kOpGtS = 0x4A, kOpLeS = 0x4C, kOpGeS = 0x4E, kOpGeU = 0x4F,
+    kOpAdd = 0x6A, kOpSub = 0x6B, kOpMul = 0x6C, kOpAnd = 0x71, kOpOr = 0x72, kOpXor = 0x73, kOpShl = 0x74, kOpShrU = 0x76, kOpExt16 = 0xC1, kOpBr = 0x0C,
+    kOpI64Add = 0x7C, kOpI64Or = 0x84, kOpI64Shl = 0x86, kOpI64ShrU = 0x88, kOpF64Sqrt = 0x9F, kOpF64Div = 0xA3, kOpWrap = 0xA7, kOpExtendU = 0xAD,
+    kOpI64FromF64 = 0xBD, kOpF64FromI64 = 0xBF,
 };
 
 enum : std::uint32_t {
-    kVSplat = 0x11, kVExtract = 0x1B, kI32x4Eq = 0x37, kI32x4LtS = 0x39, kI32x4LeS = 0x3D, kI32x4GeS = 0x3F, kF32x4Ge = 0x46,
-    kVAnd = 0x4E, kVOr = 0x50, kVBitselect = 0x52, kI32x4Neg = 0xA1, kI32x4MinS = 0xB6, kF32x4Add = 0xE4, kF32x4Sub = 0xE5, kF32x4Mul = 0xE6,
+    kVSplat = 0x11, kVExtract = 0x1B, kI32x4Eq = 0x37, kI32x4LtS = 0x39, kI32x4GtS = 0x3B, kI32x4LeS = 0x3D, kI32x4GeS = 0x3F, kF32x4Lt = 0x43,
+    kF32x4Ge = 0x46, kVAnd = 0x4E, kVAndnot = 0x4F, kVOr = 0x50, kVBitselect = 0x52, kI32x4Neg = 0xA1, kI32x4Add = 0xAE, kI32x4MinS = 0xB6,
+    kF32x4Add = 0xE4, kF32x4Sub = 0xE5, kF32x4Mul = 0xE6, kI32x4TruncF32x4S = 0xF8, kF32x4ConvertI32x4S = 0xFA,
 };
 
 enum Kind { Nop, Add, Sub, Madd, Msub, Max, Min, Mul, Abs, Ftoi, Itof, Clip, Opmula, Opmsub };
@@ -265,7 +297,8 @@ Up decode_upper(std::uint32_t hi) {
 }
 
 bool arithmetic(Kind k) { return k == Add || k == Sub || k == Mul || k == Madd || k == Msub; }
-bool vector(Kind k) { return arithmetic(k) || k == Max || k == Min || k == Abs; }
+bool outer(Kind k) { return k == Opmula || k == Opmsub; }
+bool normalized(Kind k) { return arithmetic(k) || outer(k); }
 
 bool active(const Up &u, bool flags_live) {
     if (u.kind == Nop || u.kind == Clip) return false;
@@ -280,10 +313,10 @@ bool sets_flags(std::uint32_t hi) {
 std::vector<int> shadow_reads(std::uint32_t hi) {
     const Up u = decode_upper(hi);
     std::vector<int> regs;
-    if (!active(u, true) || !arithmetic(u.kind)) return regs;
+    if (!active(u, true) || !normalized(u.kind)) return regs;
     if ((u.src == Vec || u.src == Bc) && u.ft) regs.push_back(static_cast<int>(u.ft));
     if (u.fs) regs.push_back(static_cast<int>(u.fs));
-    if (u.kind == Madd || u.kind == Msub) regs.push_back(kAcc);
+    if (u.kind == Madd || u.kind == Msub || u.kind == Opmsub) regs.push_back(kAcc);
     return regs;
 }
 
@@ -348,7 +381,11 @@ private:
     std::map<std::uint32_t, LowerInfo> lowers_;
     std::map<std::uint32_t, bool> live_in_;
     std::map<int, std::uint32_t> shadow_;
-    std::uint32_t case_index_ = 0;
+    std::vector<std::uint64_t> shadow_in_, shadow_out_;
+    std::map<std::uint32_t, std::uint32_t> case_of_;
+    std::uint32_t cases_ = 0, case_index_ = 0;
+    std::uint32_t vi_used_ = 0, vi_written_ = 0;
+    bool any_status_ = false;
 
     std::uint32_t word(std::uint32_t at) const {
         std::uint32_t v;
@@ -373,8 +410,57 @@ private:
         return false;
     }
 
+    std::vector<std::uint32_t> flow(std::uint32_t pc) {
+        std::vector<std::uint32_t> s;
+        const std::uint32_t next = (pc + 8u) & kMask;
+        if (in_.count(next)) s.push_back(next);
+        const std::uint32_t prev = (pc - 8u) & kMask;
+        if (in_.count(prev)) {
+            const LowerInfo &pl = lowers_[prev];
+            if (pl.branch && in_.count(pl.target)) s.push_back(pl.target);
+        }
+        return s;
+    }
+
+    int lower_write(std::uint32_t pc) {
+        const LowerInfo &li = lowers_[pc];
+        return (word(pc + 4) & 0x80000000u) || !li.supported ? -1 : li.writes;
+    }
+
     void fl() { c_.i32c(layout_.flags); }
-    std::uint32_t top_depth() const { return static_cast<std::uint32_t>(pcs_.size()) - case_index_ + c_.depth; }
+    void store_t() {
+        fl();
+        c_.get(kT);
+        c_.store(kOffT);
+    }
+    void br(std::uint32_t depth) {
+        c_.byte(kOpBr);
+        c_.u32(depth);
+    }
+    std::uint32_t fallback_depth() const { return cases_ - 1 - case_index_ + c_.depth; }
+    std::uint32_t loop_depth() const { return cases_ - case_index_ + c_.depth; }
+    std::uint32_t ret_depth() const { return cases_ - case_index_ + 1 + c_.depth; }
+
+    void leave(std::uint32_t pc) {
+        c_.i32c(pc & kMask);
+        c_.set(kExit);
+        br(fallback_depth());
+    }
+
+    void go(std::uint32_t pc) {
+        const auto it = case_of_.find(pc & kMask);
+        if (it == case_of_.end()) {
+            leave(pc);
+            return;
+        }
+        if (it->second > case_index_) {
+            br(it->second - case_index_ - 1 + c_.depth);
+            return;
+        }
+        c_.i32c(it->second);
+        c_.set(kPcw);
+        br(loop_depth());
+    }
 
     void vfix() {
         c_.tee(kV0);
@@ -448,8 +534,12 @@ private:
     }
 
     void vi(unsigned i) {
-        c_.get(kR);
-        c_.load16(vi_off(i));
+        if (!i) {
+            c_.i32c(0);
+            return;
+        }
+        vi_used_ |= 1u << i;
+        c_.get(kVi0 + i);
     }
 
     void branch_vi(unsigned i) {
@@ -472,10 +562,25 @@ private:
             c_.i32c(i);
             c_.set(kNextBranchReg);
         }
-        if (i) c_.get(kR);
         value();
-        if (i) c_.store16(vi_off(i));
-        else c_.op(kOpDrop);
+        if (!i) {
+            c_.op(kOpDrop);
+            return;
+        }
+        vi_used_ |= 1u << i;
+        vi_written_ |= 1u << i;
+        c_.i32c(0xFFFFu);
+        c_.op(kOpAnd);
+        c_.set(kVi0 + i);
+    }
+
+    void write_back_vi() {
+        for (unsigned i = 1; i < 16; ++i) {
+            if (!(vi_written_ & (1u << i))) continue;
+            c_.get(kR);
+            c_.get(kVi0 + i);
+            c_.store16(vi_off(i));
+        }
     }
 
     template <typename F>
@@ -613,8 +718,7 @@ private:
         c_.i32c(2);
         c_.op(kOpShl);
         c_.tee(kSlot);
-        fl();
-        c_.load(kOffT);
+        c_.get(kT);
         c_.store(layout_.flags + kOffMacTs);
         c_.get(kSlot);
         c_.get(kMacv);
@@ -624,22 +728,316 @@ private:
         c_.store(layout_.flags + kOffStatusV);
     }
 
+    template <typename V, typename T>
+    void ring_clip(V value, T stamp) {
+        fl();
+        fl();
+        c_.load(kOffCh);
+        c_.tee(kSlot);
+        c_.i32c(1);
+        c_.op(kOpAdd);
+        c_.store(kOffCh);
+        c_.get(kSlot);
+        c_.i32c(7);
+        c_.op(kOpAnd);
+        c_.i32c(2);
+        c_.op(kOpShl);
+        c_.tee(kSlot);
+        stamp();
+        c_.store(layout_.flags + kOffClipTs);
+        c_.get(kSlot);
+        value();
+        c_.store(layout_.flags + kOffClipV);
+    }
+
+    void take_q() {
+        c_.get(kR);
+        fl();
+        c_.load(kOffQValue);
+        c_.store(kOffQ);
+        fl();
+        c_.i32c(0);
+        c_.store8(kOffQPending);
+    }
+
+    void flush_q() {
+        fl();
+        c_.load8(kOffQPending);
+        c_.open_if();
+        take_q();
+        c_.end();
+    }
+
+    void sync_q() {
+        fl();
+        c_.load8(kOffQPending);
+        c_.get(kT);
+        fl();
+        c_.load(kOffQReady);
+        c_.op(kOpGeU);
+        c_.op(kOpAnd);
+        c_.open_if();
+        take_q();
+        c_.end();
+    }
+
+    void to_double(std::uint32_t x) {
+        c_.get(x);
+        c_.i32c(0x80000000u);
+        c_.op(kOpAnd);
+        c_.op(kOpExtendU);
+        c_.i64c(32);
+        c_.op(kOpI64Shl);
+        c_.get(x);
+        c_.i32c(0x7FFFFFFFu);
+        c_.op(kOpAnd);
+        c_.op(kOpExtendU);
+        c_.i64c(29);
+        c_.op(kOpI64Shl);
+        c_.i64c(896ull << 52);
+        c_.op(kOpI64Add);
+        c_.i64c(0);
+        c_.get(x);
+        c_.i32c(0x7F800000u);
+        c_.op(kOpAnd);
+        c_.op(kOpSelect);
+        c_.op(kOpI64Or);
+        c_.op(kOpF64FromI64);
+    }
+
+    void from_double() {
+        c_.op(kOpI64FromF64);
+        c_.tee(kBits);
+        c_.i64c(32);
+        c_.op(kOpI64ShrU);
+        c_.op(kOpWrap);
+        c_.i32c(0x80000000u);
+        c_.op(kOpAnd);
+        c_.set(kSign);
+        c_.get(kBits);
+        c_.i64c(52);
+        c_.op(kOpI64ShrU);
+        c_.op(kOpWrap);
+        c_.i32c(0x7FFu);
+        c_.op(kOpAnd);
+        c_.i32c(896);
+        c_.op(kOpSub);
+        c_.set(kExp);
+        c_.get(kSign);
+        c_.i32c(0x7FFFFFFFu);
+        c_.op(kOpOr);
+        c_.get(kSign);
+        c_.get(kExp);
+        c_.i32c(23);
+        c_.op(kOpShl);
+        c_.op(kOpOr);
+        c_.get(kBits);
+        c_.i64c(29);
+        c_.op(kOpI64ShrU);
+        c_.op(kOpWrap);
+        c_.i32c(0x7FFFFFu);
+        c_.op(kOpAnd);
+        c_.op(kOpOr);
+        c_.get(kExp);
+        c_.i32c(255);
+        c_.op(kOpGtS);
+        c_.op(kOpSelect);
+        c_.get(kSign);
+        c_.get(kExp);
+        c_.i32c(0);
+        c_.op(kOpGtS);
+        c_.op(kOpSelect);
+    }
+
+    template <typename F>
+    void start_q(F value, std::uint32_t latency) {
+        flush_q();
+        fl();
+        value();
+        c_.store(kOffQValue);
+        fl();
+        c_.get(kT);
+        c_.i32c(latency);
+        c_.op(kOpAdd);
+        c_.store(kOffQReady);
+        fl();
+        c_.i32c(1);
+        c_.store8(kOffQPending);
+    }
+
+    void divide_status(std::uint32_t divisor) {
+        c_.get(kR);
+        c_.get(kR);
+        c_.load(kOffStatus);
+        c_.i32c(~0x30u);
+        c_.op(kOpAnd);
+        c_.i32c(0);
+        c_.i32c(0x20u);
+        c_.get(divisor);
+        c_.i32c(0x7F800000u);
+        c_.op(kOpAnd);
+        c_.op(kOpSelect);
+        c_.op(kOpOr);
+        c_.store(kOffStatus);
+    }
+
+    void clip_value(const Up &u);
+    void itof(const Up &u);
+    void ftoi(const Up &u);
+    void outer_product(const Up &u);
     void upper_pre(const Up &u, bool flags_live);
     void upper_post(const Up &u, bool flags_live);
     bool lower(std::uint32_t w, std::uint32_t pc);
-    void branch_to(std::uint32_t pc_local_value_known, bool from_local);
+    void instruction(std::uint32_t pc, std::uint32_t following);
+    void prologue();
 };
+
+void Translator::clip_value(const Up &u) {
+    raw_vec(u.fs);
+    c_.set(kV2);
+    vkey_of(kV2);
+    c_.set(kV3);
+    raw_lane(u.ft, 3);
+    c_.i32c(0x7FFFFFFFu);
+    c_.op(kOpAnd);
+    c_.tee(kTmp);
+    c_.i32c(0);
+    c_.get(kTmp);
+    c_.i32c(0x7F800000u);
+    c_.op(kOpAnd);
+    c_.op(kOpSelect);
+    c_.simd(kVSplat);
+    c_.set(kV4);
+    c_.get(kV3);
+    c_.get(kV4);
+    c_.simd(kI32x4GtS);
+    c_.vconst(1, 4, 16, 0);
+    c_.simd(kVAnd);
+    c_.get(kV3);
+    c_.get(kV4);
+    c_.simd(kI32x4Neg);
+    c_.simd(kI32x4LtS);
+    c_.vconst(2, 8, 32, 0);
+    c_.simd(kVAnd);
+    c_.simd(kVOr);
+    c_.tee(kV5);
+    for (std::uint8_t l = 0; l < 3; ++l) {
+        if (l) c_.get(kV5);
+        c_.simd(kVExtract);
+        c_.byte(l);
+        if (l) c_.op(kOpOr);
+    }
+    c_.get(kR);
+    c_.load(kOffClip);
+    c_.i32c(6);
+    c_.op(kOpShl);
+    c_.op(kOpOr);
+    c_.i32c(0xFFFFFFu);
+    c_.op(kOpAnd);
+    c_.set(kUclip);
+}
+
+void Translator::itof(const Up &u) {
+    raw_vec(u.fs);
+    c_.tee(kV2);
+    c_.simd(kF32x4ConvertI32x4S);
+    c_.tee(kV3);
+    c_.vsplatc(0x4F000000u);
+    c_.simd(kF32x4Ge);
+    c_.tee(kV4);
+    c_.get(kV3);
+    c_.get(kV4);
+    c_.simd(kVAndnot);
+    c_.simd(kI32x4TruncF32x4S);
+    c_.set(kV5);
+    c_.get(kV2);
+    c_.vsplatc(0);
+    c_.simd(kI32x4GeS);
+    c_.get(kV5);
+    c_.get(kV2);
+    c_.simd(kI32x4GtS);
+    c_.simd(kVAnd);
+    c_.simd(kVOr);
+    c_.get(kV2);
+    c_.vsplatc(0);
+    c_.simd(kI32x4LtS);
+    c_.get(kV5);
+    c_.get(kV2);
+    c_.simd(kI32x4LtS);
+    c_.simd(kVAnd);
+    c_.simd(kVOr);
+    c_.get(kV3);
+    c_.simd(kI32x4Add);
+    if (u.frac) {
+        c_.vsplatc((127u - static_cast<std::uint32_t>(u.frac)) << 23);
+        c_.simd(kF32x4Mul);
+    }
+    c_.set(kUv);
+}
+
+void Translator::ftoi(const Up &u) {
+    raw_vec(u.fs);
+    vfix();
+    if (u.frac) {
+        c_.vsplatc((127u + static_cast<std::uint32_t>(u.frac)) << 23);
+        c_.simd(kF32x4Mul);
+    }
+    c_.tee(kV2);
+    c_.vsplatc(0x4F000000u);
+    c_.simd(kF32x4Ge);
+    c_.tee(kV3);
+    c_.get(kV2);
+    c_.vsplatc(0xCF000000u);
+    c_.simd(kF32x4Lt);
+    c_.tee(kV4);
+    c_.simd(kVOr);
+    c_.set(kV5);
+    c_.get(kV2);
+    c_.get(kV5);
+    c_.simd(kVAndnot);
+    c_.simd(kI32x4TruncF32x4S);
+    c_.get(kV5);
+    c_.simd(kVAndnot);
+    c_.get(kV3);
+    c_.vsplatc(0x7FFFFFFFu);
+    c_.simd(kVAnd);
+    c_.simd(kVOr);
+    c_.get(kV4);
+    c_.vsplatc(0x80000000u);
+    c_.simd(kVAnd);
+    c_.simd(kVOr);
+    c_.set(kUv);
+}
+
+void Translator::outer_product(const Up &u) {
+    static const std::uint8_t kYzx[16] = {4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 12, 13, 14, 15};
+    static const std::uint8_t kZxy[16] = {8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15};
+    if (u.kind == Opmsub) c_.get(shadow_.at(kAcc));
+    shadow_vec(u.fs);
+    shadow_vec(u.fs);
+    c_.shuffle(kYzx);
+    shadow_vec(u.ft);
+    shadow_vec(u.ft);
+    c_.shuffle(kZxy);
+    c_.simd(kF32x4Mul);
+    vfix();
+    if (u.kind == Opmsub) {
+        c_.simd(kF32x4Sub);
+        vfix();
+    }
+    c_.set(kUv);
+}
 
 void Translator::upper_pre(const Up &u, bool flags_live) {
     if (u.kind == Clip) {
-        c_.get(kR);
-        c_.i32c(u.fs);
-        c_.i32c(u.ft);
-        c_.call(kClipValue);
-        c_.set(kUclip);
+        clip_value(u);
         return;
     }
     if (!active(u, flags_live)) return;
+    if (outer(u.kind)) {
+        outer_product(u);
+        return;
+    }
     if (arithmetic(u.kind)) {
         if (u.kind == Madd || u.kind == Msub) c_.get(shadow_.at(kAcc));
         shadow_vec(u.fs);
@@ -688,130 +1086,75 @@ void Translator::upper_pre(const Up &u, bool flags_live) {
         c_.set(kUv);
         return;
     }
-    if (vector(u.kind)) {
-        raw_vec(u.fs);
-        if (u.kind == Abs) {
-            c_.vsplatc(0x7FFFFFFFu);
-            c_.simd(kVAnd);
-            c_.set(kUv);
-            return;
-        }
-        c_.set(kV2);
-        switch (u.src) {
-        case Vec: raw_vec(u.ft); break;
-        case Bc:
-            raw_lane(u.ft, u.bc);
-            c_.simd(kVSplat);
-            break;
-        case Q:
-            c_.get(kR);
-            c_.load(kOffQ);
-            c_.simd(kVSplat);
-            break;
-        default:
-            c_.get(kR);
-            c_.load(kOffI);
-            c_.simd(kVSplat);
-            break;
-        }
-        c_.set(kV3);
-        c_.get(kV2);
-        c_.get(kV3);
-        vkey_of(kV2);
-        vkey_of(kV3);
-        c_.simd(u.kind == Max ? kI32x4GeS : kI32x4LeS);
-        c_.simd(kVBitselect);
+    if (u.kind == Itof) {
+        itof(u);
+        return;
+    }
+    if (u.kind == Ftoi) {
+        ftoi(u);
+        return;
+    }
+    raw_vec(u.fs);
+    if (u.kind == Abs) {
+        c_.vsplatc(0x7FFFFFFFu);
+        c_.simd(kVAnd);
         c_.set(kUv);
         return;
     }
-    static const unsigned a[3] = {1, 2, 0}, b[3] = {2, 0, 1};
-    for (unsigned l = 0; l < 4; ++l) {
-        if (!lane(u.dest, static_cast<int>(l))) continue;
-        switch (u.kind) {
-        case Ftoi:
-            raw_lane(u.fs, l);
-            c_.i32c(static_cast<std::uint32_t>(u.frac));
-            c_.call(kToFixed);
-            break;
-        case Itof:
-            mem_lane(u.fs, l);
-            c_.i32c(static_cast<std::uint32_t>(u.frac));
-            c_.call(kFromFixed);
-            break;
-        case Opmula:
-            raw_lane(u.fs, a[l]);
-            raw_lane(u.ft, b[l]);
-            c_.call(kMul);
-            break;
-        default:
-            c_.get(kR);
-            c_.load(static_cast<std::uint32_t>(offsetof(Vu0Regs, acc)) + l * 4u);
-            raw_lane(u.fs, a[l]);
-            raw_lane(u.ft, b[l]);
-            c_.call(kMsub);
-            break;
-        }
-        c_.set(kUx + l);
+    c_.set(kV2);
+    switch (u.src) {
+    case Vec: raw_vec(u.ft); break;
+    case Bc:
+        raw_lane(u.ft, u.bc);
+        c_.simd(kVSplat);
+        break;
+    case Q:
+        c_.get(kR);
+        c_.load(kOffQ);
+        c_.simd(kVSplat);
+        break;
+    default:
+        c_.get(kR);
+        c_.load(kOffI);
+        c_.simd(kVSplat);
+        break;
     }
+    c_.set(kV3);
+    c_.get(kV2);
+    c_.get(kV3);
+    vkey_of(kV2);
+    vkey_of(kV3);
+    c_.simd(u.kind == Max ? kI32x4GeS : kI32x4LeS);
+    c_.simd(kVBitselect);
+    c_.set(kUv);
 }
 
 void Translator::upper_post(const Up &u, bool flags_live) {
     if (u.kind == Clip) {
         c_.get(kR);
-        fl();
         c_.get(kUclip);
-        c_.call(kClipPost);
+        c_.store(kOffClip);
+        ring_clip([&] { c_.get(kUclip); }, [&] { c_.get(kT); });
         return;
     }
     if (!active(u, flags_live)) return;
-    const std::uint32_t dst = reg_off(u.target < 0 ? 0 : u.target);
-    if (vector(u.kind)) {
-        if (u.target == 0) {
-            c_.get(kUv);
-            flags_inline(u.dest);
-            return;
-        }
-        c_.get(kR);
-        if (u.dest == 0xF) {
-            c_.get(kUv);
-        } else {
-            c_.get(kUv);
-            c_.get(kR);
-            c_.vload(dst);
-            lane_mask(u.dest);
-            c_.simd(kVBitselect);
-        }
-        c_.vstore(dst);
-        if (u.flags && flags_live) {
-            c_.get(kUv);
-            flags_inline(u.dest);
-        }
-        return;
-    }
     if (u.target == 0) {
-        c_.i32c(layout_.scratch);
-        c_.vconst(0, 0, 0, 0);
-        c_.vstore(0);
-        for (unsigned l = 0; l < 4; ++l) {
-            if (!lane(u.dest, static_cast<int>(l))) continue;
-            c_.i32c(layout_.scratch);
-            c_.get(kUx + l);
-            c_.store(l * 4u);
-        }
-        c_.i32c(layout_.scratch);
-        c_.vload(0);
+        c_.get(kUv);
         flags_inline(u.dest);
         return;
     }
-    for (unsigned l = 0; l < 4; ++l) {
-        if (!lane(u.dest, static_cast<int>(l))) continue;
-        c_.get(kR);
-        c_.get(kUx + l);
-        c_.store(dst + l * 4u);
-    }
-    if (u.flags && flags_live) {
+    const std::uint32_t dst = reg_off(u.target);
+    c_.get(kR);
+    c_.get(kUv);
+    if (u.dest != 0xF) {
         c_.get(kR);
         c_.vload(dst);
+        lane_mask(u.dest);
+        c_.simd(kVBitselect);
+    }
+    c_.vstore(dst);
+    if (u.flags && flags_live) {
+        c_.get(kUv);
         flags_inline(u.dest);
     }
 }
@@ -914,29 +1257,72 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
             lanes_store(dest, fs);
             break;
         case 0x38:
-            c_.get(kR);
             mem_lane(fs, fsf);
+            c_.set(kTmp);
             mem_lane(ft, ftf);
-            c_.i32c(q_delay(code_, kMask, pc, 7));
-            c_.call(kDiv);
+            c_.set(kTmp2);
+            start_q(
+                [&] {
+                    to_double(kTmp);
+                    to_double(kTmp2);
+                    c_.op(kOpF64Div);
+                    from_double();
+                    c_.get(kTmp);
+                    c_.get(kTmp2);
+                    c_.op(kOpXor);
+                    c_.i32c(0x80000000u);
+                    c_.op(kOpAnd);
+                    c_.i32c(0x7FFFFFFFu);
+                    c_.op(kOpOr);
+                    c_.get(kTmp2);
+                    c_.i32c(0x7F800000u);
+                    c_.op(kOpAnd);
+                    c_.op(kOpSelect);
+                },
+                q_delay(code_, kMask, pc, 7));
+            divide_status(kTmp2);
             break;
         case 0x39:
-            c_.get(kR);
             mem_lane(ft, ftf);
-            c_.i32c(q_delay(code_, kMask, pc, 7));
-            c_.call(kSqrt);
+            c_.i32c(0x7FFFFFFFu);
+            c_.op(kOpAnd);
+            c_.set(kTmp2);
+            start_q(
+                [&] {
+                    to_double(kTmp2);
+                    c_.op(kOpF64Sqrt);
+                    from_double();
+                },
+                q_delay(code_, kMask, pc, 7));
             break;
         case 0x3A:
-            c_.get(kR);
             mem_lane(fs, fsf);
+            c_.set(kTmp);
             mem_lane(ft, ftf);
-            c_.i32c(q_delay(code_, kMask, pc, 13));
-            c_.call(kRsqrt);
+            c_.i32c(0x7FFFFFFFu);
+            c_.op(kOpAnd);
+            c_.set(kTmp2);
+            start_q(
+                [&] {
+                    to_double(kTmp);
+                    to_double(kTmp2);
+                    c_.op(kOpF64Sqrt);
+                    c_.op(kOpF64Div);
+                    from_double();
+                    c_.get(kTmp);
+                    c_.i32c(0x80000000u);
+                    c_.op(kOpAnd);
+                    c_.i32c(0x7FFFFFFFu);
+                    c_.op(kOpOr);
+                    c_.get(kTmp2);
+                    c_.i32c(0x7F800000u);
+                    c_.op(kOpAnd);
+                    c_.op(kOpSelect);
+                },
+                q_delay(code_, kMask, pc, 13));
+            divide_status(kTmp2);
             break;
-        case 0x3B:
-            c_.get(kR);
-            c_.call(kFlushQ);
-            break;
+        case 0x3B: flush_q(); break;
         case 0x3C: set_vi(it, [&] { mem_lane(fs, fsf); }); break;
         case 0x3D:
             if (ft) {
@@ -972,7 +1358,21 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
             c_.get(kR);
             c_.get(kR);
             c_.load(kOffR);
-            c_.call(kRandNext);
+            c_.tee(kTmp);
+            c_.i32c(4);
+            c_.op(kOpShrU);
+            c_.get(kTmp);
+            c_.i32c(22);
+            c_.op(kOpShrU);
+            c_.op(kOpXor);
+            c_.i32c(1);
+            c_.op(kOpAnd);
+            c_.get(kTmp);
+            c_.i32c(1);
+            c_.op(kOpShl);
+            c_.op(kOpOr);
+            c_.i32c(0x7FFFFFu);
+            c_.op(kOpAnd);
             c_.store(kOffR);
             if (ft) {
                 c_.get(kR);
@@ -1042,14 +1442,17 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
     const std::uint32_t imm12 = ((w >> 10) & 0x800u) | (w & 0x7FFu);
     const std::uint32_t imm24 = w & 0xFFFFFFu;
     const auto status = [&] {
+        store_t();
         fl();
         c_.call(kStatus);
     };
     const auto mac = [&] {
+        store_t();
         fl();
         c_.call(kMac);
     };
     const auto clip = [&] {
+        store_t();
         fl();
         c_.call(kClip);
     };
@@ -1118,13 +1521,12 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
         c_.get(kR);
         c_.i32c(imm24);
         c_.store(kOffClip);
-        fl();
-        c_.i32c(imm24);
-        fl();
-        c_.load(0);
-        c_.i32c(4);
-        c_.op(kOpSub);
-        c_.call(kSetClip);
+        ring_clip([&] { c_.i32c(imm24); },
+                  [&] {
+                      c_.get(kT);
+                      c_.i32c(4);
+                      c_.op(kOpSub);
+                  });
         break;
     case 0x12:
         set_vi(1, [&] {
@@ -1261,15 +1663,166 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
     return true;
 }
 
+void Translator::instruction(std::uint32_t pc, std::uint32_t following) {
+    const std::uint32_t lo = word(pc), hi = word(pc + 4);
+    const Up u = decode_upper(hi);
+    const bool flags_live = any_status_ || out_live(pc);
+    const LowerInfo &li = lowers_[pc];
+
+    c_.get(kT);
+    c_.i32c(1);
+    c_.op(kOpAdd);
+    c_.set(kT);
+    if (reads_q(hi)) {
+        const QRead kind = q_read_kind(code_, kMask, pc);
+        if (kind == kQNew) flush_q();
+        else if (kind == kQDynamic) sync_q();
+    }
+    c_.i32c(0);
+    c_.set(kNextBranchReg);
+    // Flag reads bypass the VI delay seen by branch operands.
+    delay_vi_ = !branch_delay_exempt(lo);
+    upper_pre(u, flags_live);
+    if (hi & 0x80000000u) {
+        c_.get(kR);
+        c_.i32c(lo);
+        c_.store(kOffI);
+    } else if (!li.supported || !lower(lo, pc)) {
+        leave(pc);
+    }
+    c_.get(kNextBranchReg);
+    c_.set(kBranchReg);
+    c_.get(kNextBranchValue);
+    c_.set(kBranchValue);
+    upper_post(u, flags_live);
+    const int written = lower_write(pc);
+    const std::uint64_t live = shadow_out_[pc >> 3];
+    if (written >= 0 && shadow_.count(written) && ((live >> written) & 1u)) {
+        c_.get(kR);
+        c_.vload(reg_off(written));
+        vfix();
+        c_.set(shadow_.at(written));
+    }
+    const bool target_active = active(u, flags_live) && u.target > 0;
+    if (target_active && u.target != written && shadow_.count(u.target) && ((live >> u.target) & 1u)) {
+        if (!normalized(u.kind)) {
+            c_.get(kR);
+            c_.vload(reg_off(u.target));
+            vfix();
+        } else if (u.dest == 0xF) {
+            c_.get(kUv);
+        } else {
+            c_.get(kUv);
+            c_.get(shadow_.at(u.target));
+            lane_mask(u.dest);
+            c_.simd(kVBitselect);
+        }
+        c_.set(shadow_.at(u.target));
+    }
+    if (hi & 0x40000000u) {
+        c_.i32c(1);
+        c_.set(kEnding);
+    }
+
+    const std::uint32_t prev = (pc - 8u) & kMask;
+    if (in_.count(prev)) {
+        const LowerInfo &pl = lowers_[prev];
+        if (word(prev + 4) & 0x40000000u) {
+            c_.get(kEnding);
+            c_.open_if();
+            if (pl.branch || pl.jump) {
+                if (pl.branch) c_.i32c(pl.target & kMask);
+                else c_.get(kJpc);
+                c_.i32c((pc + 8u) & kMask);
+                c_.get(pl.branch ? kPend : kPendj);
+                c_.op(kOpSelect);
+            } else {
+                c_.i32c((pc + 8u) & kMask);
+            }
+            c_.set(kExit);
+            br(ret_depth());
+            c_.end();
+        }
+        if (pl.branch) {
+            c_.get(kPend);
+            c_.open_if();
+            c_.i32c(0);
+            c_.set(kPend);
+            go(pl.target);
+            c_.end();
+        }
+        if (pl.jump) {
+            c_.get(kPendj);
+            c_.open_if();
+            c_.i32c(0);
+            c_.set(kPendj);
+            c_.get(kJpc);
+            c_.set(kExit);
+            br(fallback_depth());
+            c_.end();
+        }
+    }
+    const std::uint32_t next = (pc + 8u) & kMask;
+    if (!in_.count(next)) leave(next);
+    else if (next != following) go(next);
+}
+
+void Translator::prologue() {
+    for (const std::uint32_t at : {kOffMacTs, kOffMacTs + 16u, kOffClipTs, kOffClipTs + 16u}) {
+        fl();
+        c_.vconst(0, 0, 0, 0);
+        c_.vstore(at);
+    }
+    const std::pair<std::uint32_t, std::uint32_t> rings[3] = {{kOffMac, kOffMacV}, {kOffStatus, kOffStatusV}, {kOffClip, kOffClipV}};
+    for (const auto &[from, to] : rings) {
+        c_.get(kR);
+        c_.load(from);
+        c_.simd(kVSplat);
+        c_.set(kV0);
+        fl();
+        c_.get(kV0);
+        c_.vstore(to);
+        fl();
+        c_.get(kV0);
+        c_.vstore(to + 16u);
+    }
+    fl();
+    c_.i32c(0);
+    c_.store(kOffMh);
+    fl();
+    c_.i32c(0);
+    c_.store(kOffCh);
+    fl();
+    c_.i32c(0);
+    c_.store8(kOffQPending);
+    c_.i32c(16);
+    c_.set(kT);
+    for (unsigned i = 1; i < 16; ++i) {
+        if (!(vi_used_ & (1u << i))) continue;
+        c_.get(kR);
+        c_.load16(vi_off(i));
+        c_.set(kVi0 + i);
+    }
+    const std::uint64_t live = shadow_in_[entry_ >> 3];
+    for (const auto &[reg, local] : shadow_) {
+        if (!((live >> reg) & 1u)) continue;
+        c_.get(kR);
+        c_.vload(reg_off(reg));
+        vfix();
+        c_.set(local);
+    }
+    c_.i32c(case_of_.at(entry_));
+    c_.set(kPcw);
+}
+
 bool Translator::run(std::vector<std::uint8_t> &out) {
     pcs_ = reachable(code_, kMask, entry_);
     if (pcs_.empty()) return false;
     in_.insert(pcs_.begin(), pcs_.end());
-    bool any_status = false;
     for (std::uint32_t pc : pcs_) {
         LowerInfo l;
         if (!(word(pc + 4) & 0x80000000u)) l = analyze_lower(word(pc), pc);
-        any_status = any_status || l.reads_status;
+        any_status_ = any_status_ || l.reads_status;
         lowers_[pc] = l;
     }
     for (std::uint32_t pc : pcs_) live_in_[pc] = false;
@@ -1291,176 +1844,91 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
             }
         }
     }
+
+    std::set<std::uint32_t> leaders{entry_, pcs_.front()};
+    for (std::uint32_t pc : pcs_) {
+        if (!in_.count((pc - 8u) & kMask)) leaders.insert(pc);
+        const LowerInfo &l = lowers_[pc];
+        if (l.branch && in_.count(l.target)) leaders.insert(l.target);
+    }
+    for (std::uint32_t pc : leaders) case_of_[pc] = cases_++;
+
     std::set<int> shadowed;
     for (std::uint32_t pc : pcs_)
         for (int reg : shadow_reads(word(pc + 4))) shadowed.insert(reg);
     std::uint32_t next_local = kShadow0;
     for (int reg : shadowed) shadow_[reg] = next_local++;
-
-    fl();
-    c_.get(kR);
-    c_.call(kStart);
-    for (const auto &[reg, local] : shadow_) {
-        c_.get(kR);
-        c_.vload(reg_off(reg));
-        vfix();
-        c_.set(local);
+    std::vector<std::uint64_t> uses(2048, 0), defs(2048, 0);
+    for (std::uint32_t pc : pcs_) {
+        const std::uint32_t hi = word(pc + 4), at = pc >> 3;
+        for (int reg : shadow_reads(hi)) uses[at] |= 1ull << reg;
+        const int written = lower_write(pc);
+        if (written >= 0 && shadow_.count(written)) defs[at] |= 1ull << written;
+        const Up u = decode_upper(hi);
+        if (active(u, true) && u.target > 0 && u.target != written && shadow_.count(u.target)) {
+            defs[at] |= 1ull << u.target;
+            if (normalized(u.kind) && u.dest != 0xF) uses[at] |= 1ull << u.target;
+        }
     }
-    c_.i32c(entry_ >> 3);
-    c_.set(kPcw);
-    const std::uint32_t n = static_cast<std::uint32_t>(pcs_.size());
+    shadow_in_.assign(2048, 0);
+    shadow_out_.assign(2048, 0);
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (auto it = pcs_.rbegin(); it != pcs_.rend(); ++it) {
+            const std::uint32_t at = *it >> 3;
+            std::uint64_t o = 0;
+            for (std::uint32_t s : flow(*it)) o |= shadow_in_[s >> 3];
+            shadow_out_[at] = o;
+            const std::uint64_t v = uses[at] | (o & ~defs[at]);
+            if (v != shadow_in_[at]) {
+                shadow_in_[at] = v;
+                changed = true;
+            }
+        }
+    }
+
+    c_.byte(0x02);
+    c_.byte(0x40);
     c_.byte(0x03);
     c_.byte(0x40);
     c_.byte(0x02);
     c_.byte(0x40);
-    for (std::uint32_t k = 0; k < n; ++k) {
+    for (std::uint32_t k = 0; k < cases_; ++k) {
         c_.byte(0x02);
         c_.byte(0x40);
     }
-    std::map<std::uint32_t, std::uint32_t> case_of;
-    for (std::uint32_t k = 0; k < n; ++k) case_of[pcs_[k]] = k;
     c_.get(kPcw);
     c_.byte(0x0E);
-    c_.u32(2048);
-    for (std::uint32_t p = 0; p < 2048; ++p) {
-        const auto it = case_of.find(p * 8u);
-        c_.u32(it == case_of.end() ? n : it->second);
-    }
-    c_.u32(n);
-
-    for (std::uint32_t k = 0; k < n; ++k) {
-        c_.byte(0x0B);
-        case_index_ = k;
-        const std::uint32_t pc = pcs_[k];
-        const std::uint32_t lo = word(pc), hi = word(pc + 4);
-        const Up u = decode_upper(hi);
-        const bool flags_live = any_status || out_live(pc);
-        const LowerInfo &li = lowers_[pc];
-
-        fl();
-        fl();
-        c_.load(0);
-        c_.i32c(1);
-        c_.op(kOpAdd);
-        c_.store(0);
-        if (reads_q(hi)) {
-            const QRead kind = q_read_kind(code_, kMask, pc);
-            if (kind != kQOld) {
-                c_.get(kR);
-                c_.call(kind == kQNew ? kFlushQ : kSyncQ);
-            }
+    c_.u32(cases_);
+    for (std::uint32_t k = 0; k < cases_; ++k) c_.u32(k);
+    c_.u32(cases_);
+    for (std::size_t i = 0; i < pcs_.size(); ++i) {
+        const std::uint32_t pc = pcs_[i];
+        const auto it = case_of_.find(pc);
+        if (it != case_of_.end()) {
+            c_.byte(0x0B);
+            case_index_ = it->second;
         }
-        c_.i32c(0);
-        c_.set(kNextBranchReg);
-        // Flag reads write VI without the branch operand delay.
-        delay_vi_ = !branch_delay_exempt(lo);
-        upper_pre(u, flags_live);
-        if (hi & 0x80000000u) {
-            c_.get(kR);
-            c_.i32c(lo);
-            c_.store(kOffI);
-        } else if (!li.supported || !lower(lo, pc)) {
-            c_.get(kR);
-            c_.i32c(pc);
-            c_.tail(kInterpret);
-        }
-        c_.get(kNextBranchReg);
-        c_.set(kBranchReg);
-        c_.get(kNextBranchValue);
-        c_.set(kBranchValue);
-        upper_post(u, flags_live);
-        const int lower_write = (hi & 0x80000000u) || !li.supported ? -1 : li.writes;
-        if (lower_write >= 0 && shadow_.count(lower_write)) {
-            c_.get(kR);
-            c_.vload(reg_off(lower_write));
-            vfix();
-            c_.set(shadow_.at(lower_write));
-        }
-        const bool target_active = active(u, flags_live) && u.target > 0;
-        if (target_active && u.target != lower_write && shadow_.count(u.target)) {
-            const bool normalized = vector(u.kind) && arithmetic(u.kind);
-            if (!normalized) {
-                c_.get(kR);
-                c_.vload(reg_off(u.target));
-                vfix();
-            } else if (u.dest == 0xF) {
-                c_.get(kUv);
-            } else {
-                c_.get(kUv);
-                c_.get(shadow_.at(u.target));
-                lane_mask(u.dest);
-                c_.simd(kVBitselect);
-            }
-            c_.set(shadow_.at(u.target));
-        }
-        if (hi & 0x40000000u) {
-            c_.i32c(1);
-            c_.set(kEnding);
-        }
-
-        const std::uint32_t prev = (pc - 8u) & kMask;
-        if (in_.count(prev)) {
-            const LowerInfo &pl = lowers_[prev];
-            if (word(prev + 4) & 0x40000000u) {
-                c_.get(kEnding);
-                c_.open_if();
-                c_.get(kR);
-                c_.call(kFlushQ);
-                c_.get(kR);
-                if (pl.branch || pl.jump) {
-                    if (pl.branch) c_.i32c(pl.target & kMask);
-                    else c_.get(kJpc);
-                    c_.i32c((pc + 8u) & kMask);
-                    c_.get(pl.branch ? kPend : kPendj);
-                    c_.op(kOpSelect);
-                } else {
-                    c_.i32c((pc + 8u) & kMask);
-                }
-                c_.store(kOffTpc);
-                c_.op(kOpReturn);
-                c_.end();
-            }
-            if (pl.branch) {
-                c_.get(kPend);
-                c_.open_if();
-                c_.i32c(0);
-                c_.set(kPend);
-                c_.i32c(pl.target >> 3);
-                c_.set(kPcw);
-                c_.byte(kOpBr);
-                c_.u32(top_depth());
-                c_.end();
-            }
-            if (pl.jump) {
-                c_.get(kPendj);
-                c_.open_if();
-                c_.i32c(0);
-                c_.set(kPendj);
-                c_.get(kJpc);
-                c_.i32c(3);
-                c_.op(kOpShrU);
-                c_.set(kPcw);
-                c_.byte(kOpBr);
-                c_.u32(top_depth());
-                c_.end();
-            }
-        }
-        const std::uint32_t next = (pc + 8u) & kMask;
-        if (!in_.count(next)) {
-            c_.get(kR);
-            c_.i32c(next);
-            c_.tail(kInterpret);
-        }
+        instruction(pc, i + 1 < pcs_.size() ? pcs_[i + 1] : ~0u);
     }
     c_.byte(0x0B);
+    write_back_vi();
     c_.get(kR);
-    c_.get(kPcw);
-    c_.i32c(3);
-    c_.op(kOpShl);
+    c_.get(kExit);
     c_.tail(kInterpret);
     c_.byte(0x0B);
-    c_.byte(kOpUnreachable);
     c_.byte(0x0B);
+    write_back_vi();
+    flush_q();
+    c_.get(kR);
+    c_.get(kExit);
+    c_.store(kOffTpc);
+    c_.byte(0x0B);
+
+    std::vector<std::uint8_t> body_code = std::move(c_.b);
+    c_.b.clear();
+    prologue();
+    c_.b.insert(c_.b.end(), body_code.begin(), body_code.end());
 
     Out m;
     m.b = {0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00};
@@ -1521,9 +1989,11 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
     m.section(7, es);
 
     Out body;
-    body.u32(2);
+    body.u32(3);
     body.u32(kI32Count);
     body.byte(0x7F);
+    body.u32(1);
+    body.byte(0x7E);
     body.u32(kVecTemps + static_cast<std::uint32_t>(shadow_.size()));
     body.byte(0x7B);
     body.b.insert(body.b.end(), c_.b.begin(), c_.b.end());
@@ -1532,6 +2002,16 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
     cs.u32(static_cast<std::uint32_t>(body.b.size()));
     cs.b.insert(cs.b.end(), body.b.begin(), body.b.end());
     m.section(10, cs);
+
+    char label[16];
+    std::snprintf(label, sizeof label, "vu1_%04X", entry_);
+    Out names, functions;
+    functions.u32(1);
+    functions.u32(kImports);
+    functions.name(label);
+    names.name("name");
+    names.section(1, functions);
+    m.section(0, names);
 
     out = std::move(m.b);
     return true;

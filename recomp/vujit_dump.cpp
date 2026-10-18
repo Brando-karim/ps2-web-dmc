@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
         std::vector<std::uint8_t> code(16384);
         std::ifstream(e.path(), std::ios::binary).read(reinterpret_cast<char *>(code.data()), 16384);
         std::vector<std::uint8_t> out;
-        if (!ps2::vu::jit::translate(code.data(), entry, {0x1000, 0x2000}, out)) {
+        if (!ps2::vu::jit::translate(code.data(), entry, {0x1000}, out)) {
             ++failed;
             continue;
         }
