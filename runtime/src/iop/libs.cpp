@@ -20,7 +20,8 @@ constexpr int kErrorUnknownSema = -408;
 constexpr int kErrorUnknownEvent = -409;
 constexpr int kErrorUnknownMbx = -410;
 constexpr int kErrorUnknownFpl = -412;
-constexpr int kErrorUnknownVpl = -452;
+constexpr int kErrorUnknownVpl = -411;
+constexpr int kErrorWaitDelete = -425;
 constexpr int kErrorSemaZero = -419;
 constexpr int kErrorEventCondition = -421;
 constexpr int kErrorMbxNone = -424;
@@ -100,15 +101,15 @@ struct Fpl {
     std::deque<int> waiters;
 };
 
-// Kingdom Hearts II's sound driver allocates its working memory with the
-// kernel's variable sized thread pool library: one pool of 0x39000 bytes whose
-//blocks, rounded to 128, hold streaming buffers and thread stacks. A
-// variable pool is an area the driver sub-allocates from, so keep the used
-// spans per id and serve them first fit.
+struct VplWaiter {
+    int thread;
+    std::uint32_t size;
+};
+
 struct Vpl {
-    std::uint32_t attr, option, size, base;
-    std::map<std::uint32_t, std::uint32_t> used;
-    std::deque<int> waiters;
+    std::uint32_t attr, option, base, size;
+    std::map<std::uint32_t, std::uint32_t> blocks;
+    std::deque<VplWaiter> waiters;
 };
 
 std::map<int, Vpl> g_vpls;
@@ -696,16 +697,33 @@ void install_thfpool() {
     });
 }
 
+std::uint32_t vpl_take(Vpl &v, std::uint32_t size) {
+    size = (size + 7u) & ~7u;
+    if (size == 0u) size = 8u;
+    std::uint32_t at = v.base;
+    for (const auto &[address, length] : v.blocks) {
+        if (address - at >= size) break;
+        at = address + length;
+    }
+    if (at + size > v.base + v.size) return 0;
+    v.blocks[at] = size;
+    return at;
+}
+
+std::uint32_t vpl_used(const Vpl &v) {
+    std::uint32_t used = 0;
+    for (const auto &[address, length] : v.blocks) {
+        (void)address;
+        used += length;
+    }
+    return used;
+}
+
 void install_thvpool() {
     register_hle_library("thvpool", 0x0101);
     def("thvpool", 4, "CreateVpl", [](Cpu &c) {
         const std::uint32_t p = arg(c, 0);
-        Vpl v{};
-        v.attr = read32(p);
-        v.option = read32(p + 4);
-        v.size = read32(p + 8);
-        v.size = (v.size + 0xFFu) & ~0xFFu;
-        if (!v.size) v.size = 0x100u;
+        Vpl v{read32(p), read32(p + 4), 0, (read32(p + 8) + 7u) & ~7u, {}, {}};
         v.base = alloc(v.size);
         if (!v.base) { c.r[2] = static_cast<std::uint32_t>(kErrorNoMemory); return; }
         const int id = g_next_object++;
@@ -714,51 +732,60 @@ void install_thvpool() {
     });
     def("thvpool", 5, "DeleteVpl", [](Cpu &c) {
         auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
-        if (it != g_vpls.end()) { free(it->second.base); g_vpls.erase(it); }
+        if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
+        for (const VplWaiter &w : it->second.waiters)
+            if (Thread *th = thread(w.thread)) wake(*th, static_cast<std::uint32_t>(kErrorWaitDelete));
+        if (!it->second.waiters.empty()) reschedule();
+        free(it->second.base);
+        g_vpls.erase(it);
         c.r[2] = 0;
     });
-    const auto allocate = [](Cpu &c, bool wait) {
+    def("thvpool", 6, "AllocateVpl", [](Cpu &c) {
         auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
         if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
-        Vpl &v = it->second;
-        const std::uint32_t size = (arg(c, 1) + 3u) & ~3u;
-        std::uint32_t at = v.base;
-        for (const auto &[a, s] : v.used) {
-            if (a > at && a - at >= size) break;
-            at = a + s;
-        }
-        if (size <= v.size && at - v.base + size <= v.size) { v.used[at] = size; c.r[2] = at; return; }
-        if (!wait) { c.r[2] = 0; return; }
-        v.waiters.push_back(current() ? current()->id : 0);
+        if (const std::uint32_t at = vpl_take(it->second, arg(c, 1))) { c.r[2] = at; return; }
+        it->second.waiters.push_back(VplWaiter{current() ? current()->id : 0, arg(c, 1)});
         block(c, kWaitVpl, it->first);
+    });
+    auto poll = [](Cpu &c) {
+        auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
+        if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
+        const std::uint32_t at = vpl_take(it->second, arg(c, 1));
+        c.r[2] = at ? at : static_cast<std::uint32_t>(kErrorNoMemory);
     };
-    def("thvpool", 6, "AllocateVpl", [allocate](Cpu &c) { allocate(c, true); });
-    def("thvpool", 7, "pAllocateVpl", [allocate](Cpu &c) { allocate(c, false); });
-    def("thvpool", 8, "ipAllocateVpl", [allocate](Cpu &c) { allocate(c, false); });
+    def("thvpool", 7, "pAllocateVpl", poll);
+    def("thvpool", 8, "ipAllocateVpl", poll);
     def("thvpool", 9, "FreeVpl", [](Cpu &c) {
         auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
         if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
-        const std::uint32_t block_addr = arg(c, 1);
-        it->second.used.erase(block_addr);
-        if (!it->second.waiters.empty()) {
-            const int t = it->second.waiters.front();
-            it->second.waiters.pop_front();
-            if (Thread *th = thread(t)) wake(*th, block_addr);
-            reschedule();
+        Vpl &v = it->second;
+        v.blocks.erase(arg(c, 1));
+        bool woke = false;
+        while (!v.waiters.empty()) {
+            const std::uint32_t at = vpl_take(v, v.waiters.front().size);
+            if (!at) break;
+            if (Thread *th = thread(v.waiters.front().thread)) wake(*th, at);
+            v.waiters.pop_front();
+            woke = true;
         }
+        if (woke) reschedule();
         c.r[2] = 0;
     });
-    def("thvpool", 11, "ReferVplStatus", [](Cpu &c) {
+    auto refer = [](Cpu &c) {
         auto it = g_vpls.find(static_cast<int>(arg(c, 0)));
         if (it == g_vpls.end()) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownVpl); return; }
-        std::uint32_t used = 0;
-        for (const auto &[a, s] : it->second.used) used += s;
-        const std::uint32_t p = arg(c, 1);
-        write32(p + 0, it->second.attr);
-        write32(p + 4, used);
-        write32(p + 8, it->second.size - used);
+        const Vpl &v = it->second;
+        if (const std::uint32_t p = arg(c, 1)) {
+            write32(p + 0, v.attr);
+            write32(p + 4, v.option);
+            write32(p + 8, v.size);
+            write32(p + 12, v.size - vpl_used(v));
+            write32(p + 16, static_cast<std::uint32_t>(v.waiters.size()));
+        }
         c.r[2] = 0;
-    });
+    };
+    def("thvpool", 11, "ReferVplStatus", refer);
+    def("thvpool", 12, "iReferVplStatus", refer);
 }
 
 void install_sysclib() {
@@ -1229,6 +1256,15 @@ void libs_state(ps2::state::Stream &s) {
         s.vec(v.free);
         s.deque(v.waiters);
     });
+    if (s.version() >= 3)
+        s.map(g_vpls, [&s](Vpl &v) {
+            s.pod(v.attr);
+            s.pod(v.option);
+            s.pod(v.base);
+            s.pod(v.size);
+            s.map(v.blocks);
+            s.deque(v.waiters);
+        });
     s.map(g_heaps, [&s](std::set<std::uint32_t> &v) { s.set(v); });
     s.vec(g_vblank_handlers);
     s.vec(g_vblank_start_waiters);
