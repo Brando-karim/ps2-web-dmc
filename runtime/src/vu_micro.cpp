@@ -861,10 +861,7 @@ void interpret(int unit, std::uint32_t pc) {
 void run_entry(int unit, std::uint32_t pc) {
     // Compiled programs are the default; retain an interpreter override for
     // differential checks and diagnosing newly recorded programs.
-    static const bool interpret_only = [] {
-        const char *env = std::getenv("PS2_VU_JIT");
-        return env && std::strcmp(env, "0") == 0;
-    }();
+    static const bool interpret_only = std::getenv("PS2_VU_INTERPRET") != nullptr;
     static const bool count = std::getenv("PS2_VU_COUNT") != nullptr;
     static std::uint64_t compiled = 0, interpreted = 0;
     static std::unordered_map<std::uint32_t, std::uint64_t> misses;
