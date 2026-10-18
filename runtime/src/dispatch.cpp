@@ -48,7 +48,8 @@ bool loaded_at(const ModuleInfo &m, std::uint32_t base) {
 std::uint32_t g_spot_cursor = 0;
 
 const Instance *in_place(const Instance &i) {
-    if (std::getenv("PS2_WINDOW_FULL")) return loaded_at(*i.module, i.base) ? &i : nullptr;
+    static const bool full = std::getenv("PS2_WINDOW_FULL") != nullptr;
+    if (full || !i.module->fixed_base) return loaded_at(*i.module, i.base) ? &i : nullptr;
     if (!i.module->check_count) return &i;
     const std::uint32_t c = g_spot_cursor++ % i.module->check_count;
     return ld32(i.base + i.module->checks[2 * c]) == i.module->checks[2 * c + 1] ? &i : nullptr;
