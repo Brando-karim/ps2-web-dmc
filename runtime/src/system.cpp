@@ -101,6 +101,18 @@ void dump_frame() {
 }
 
 void apply_presses() {
+    if (!g_options.presses.empty()) {
+        std::uint16_t mask = 0;
+        std::uint8_t stick = 0;
+        for (const Press &p : g_options.presses)
+            if (g_frames >= p.frame && g_frames < p.frame + p.frames) {
+                mask |= p.buttons;
+                stick |= p.stick;
+            }
+        iop::sio2::set_buttons(0, mask);
+        iop::sio2::set_axis(0, 2, (stick & 4u) ? 0x00 : (stick & 8u) ? 0xFF : 0x80);
+        iop::sio2::set_axis(0, 3, (stick & 1u) ? 0x00 : (stick & 2u) ? 0xFF : 0x80);
+    }
     if (!g_options.axis_presses.empty()) {
         // Outside a hold the stick rests; within one it takes the given tilt.
         std::uint8_t axes[4] = {0x80, 0x80, 0x80, 0x80};
@@ -108,17 +120,6 @@ void apply_presses() {
             if (g_frames >= p.frame && g_frames < p.frame + p.frames) axes[p.axis] = p.value;
         for (int a = 0; a < 4; ++a) iop::sio2::set_axis(0, a, axes[a]);
     }
-    if (g_options.presses.empty()) return;
-    std::uint16_t mask = 0;
-    std::uint8_t stick = 0;
-    for (const Press &p : g_options.presses)
-        if (g_frames >= p.frame && g_frames < p.frame + p.frames) {
-            mask |= p.buttons;
-            stick |= p.stick;
-        }
-    iop::sio2::set_buttons(0, mask);
-    iop::sio2::set_axis(0, 2, (stick & 4u) ? 0x00 : (stick & 8u) ? 0xFF : 0x80);
-    iop::sio2::set_axis(0, 3, (stick & 1u) ? 0x00 : (stick & 2u) ? 0xFF : 0x80);
 }
 
 void time_frames() {
