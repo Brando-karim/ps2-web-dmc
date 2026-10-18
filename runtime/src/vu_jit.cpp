@@ -390,7 +390,7 @@ private:
     std::set<std::uint32_t> keep_bk_, set_bi_;
     int delay_mode_ = 0;
     unsigned delay_reg_ = 0;
-    bool any_status_ = false;
+    bool any_status_ = false, any_flags_ = false;
 
     std::uint32_t word(std::uint32_t at) const {
         std::uint32_t v;
@@ -1699,7 +1699,7 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
 void Translator::instruction(std::uint32_t pc, std::uint32_t following) {
     const std::uint32_t lo = word(pc), hi = word(pc + 4);
     const Up u = decode_upper(hi);
-    const bool flags_live = any_status_ || out_live(pc);
+    const bool flags_live = any_status_ ? true : (any_flags_ && out_live(pc));
     const LowerInfo &li = lowers_[pc];
 
     c_.get(kT);
@@ -1865,6 +1865,7 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
         LowerInfo l;
         if (!(word(pc + 4) & 0x80000000u)) l = analyze_lower(word(pc), pc);
         any_status_ = any_status_ || l.reads_status;
+        any_flags_ = any_flags_ || l.reads_flags;
         lowers_[pc] = l;
     }
     for (std::uint32_t pc : pcs_) live_in_[pc] = false;

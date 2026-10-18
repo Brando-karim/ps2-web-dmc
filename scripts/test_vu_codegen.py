@@ -57,8 +57,9 @@ int main(int argc, char **argv) {
             put(0, addi(1, 0, 1));
             put(8, ((test == 6 ? 0x24u : 0x25u) << 25) | (1u << 11) | (1u << 16), unop | end);
         } else {
-            // Flags remain observable after exit even with no local reader.
+            // Flags remain observable after exit in a program that reads them.
             put(0, nop, (0xFu << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u | end);
+            put(8, (0x16u << 25) | (2u << 16));
         }
         std::string name;
         native << generate(p, name);
@@ -102,6 +103,7 @@ for (let test = 0; test < 8; ++test) {
     env[imp.name] = () => { throw Error(`Unexpected import: ${imp.name}`); };
   }
   env.clip = () => 1;
+  env.status = () => 0;
   new WebAssembly.Instance(mod, {env}).exports.run(r, 0x4000);
   if (test >= 6) {
     if (view.getUint32(r + off.tpc, true) !== 8) throw Error(`Register jump regression ${test}`);

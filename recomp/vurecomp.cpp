@@ -485,7 +485,7 @@ std::string generate(const Program &p, std::string &name) {
     const std::vector<std::uint32_t> pcs = ps2::vu::reachable(p.code.data(), kMask, p.entry);
     std::set<std::uint32_t> in(pcs.begin(), pcs.end());
     std::map<std::uint32_t, Lower> lowers;
-    bool any_status = false, any_q = false;
+    bool any_status = false, any_flags = false, any_q = false;
     for (std::uint32_t pc : pcs) {
         const std::uint32_t lo = word(p.code, pc), hi = word(p.code, pc + 4);
         Lower l;
@@ -493,6 +493,7 @@ std::string generate(const Program &p, std::string &name) {
         for (const std::uint32_t latency : {7u, 13u})
             replace_all(l.code, std::format("fl.end_q(r, qb, {}u)", latency), std::format("fl.end_q(r, qb, {}u)", ps2::vu::q_delay(p.code.data(), kMask, pc, latency)));
         any_status = any_status || l.reads_status;
+        any_flags = any_flags || l.reads_flags;
         any_q = any_q || l.code.find("fl.end_q(") != std::string::npos;
         lowers[pc] = l;
     }
@@ -541,7 +542,7 @@ std::string generate(const Program &p, std::string &name) {
         const std::uint32_t lo = word(p.code, pc), hi = word(p.code, pc + 4);
         bool out_live = false;
         for (std::int64_t s : successors(pc)) out_live = out_live || s < 0 || !in.count(static_cast<std::uint32_t>(s)) || live_in[static_cast<std::uint32_t>(s)];
-        const Upper u = upper(hi, any_status || out_live);
+        const Upper u = upper(hi, any_status ? true : (any_flags && out_live));
         const Lower &l = lowers[pc];
         // Save the VI write for the next executed instruction, including
         // taken branches. Branch operands use the previous instruction's view.
