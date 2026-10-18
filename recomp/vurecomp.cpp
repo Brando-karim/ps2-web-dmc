@@ -1,5 +1,6 @@
 #include "ps2/vu_ops.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -530,12 +531,42 @@ std::string generate(const Program &p, std::string &name) {
             }
         }
     }
+    std::map<std::uint32_t, int> def;
+    std::map<std::uint32_t, std::vector<std::uint32_t>> preds;
+    std::set<std::uint32_t> targets;
+    for (std::uint32_t pc : pcs) {
+        const std::uint32_t lo = word(p.code, pc), hi = word(p.code, pc + 4);
+        def[pc] = (hi & 0x80000000u) || ps2::vu::branch_delay_exempt(lo) ? -1 : vi_written(lowers[pc].code);
+        if (lowers[pc].branch) targets.insert(lowers[pc].target & kMask);
+        for (std::int64_t s : successors(pc))
+            if (s >= 0 && in.count(static_cast<std::uint32_t>(s))) preds[static_cast<std::uint32_t>(s)].push_back(pc);
+    }
+    std::map<std::uint32_t, int> delay;
+    std::set<std::uint32_t> keep_bk, set_bi;
+    for (std::uint32_t pc : pcs) {
+        if (!lowers[pc].branch) continue;
+        const std::uint32_t lo = word(p.code, pc), op = lo >> 25, it = (lo >> 16) & 15u, is = (lo >> 11) & 15u;
+        std::uint32_t reads = 0;
+        if (op == 0x28 || op == 0x29) reads = (1u << is) | (1u << it);
+        else if (op >= 0x2C && op <= 0x2F) reads = 1u << is;
+        reads &= ~1u;
+        bool hit = false;
+        for (std::uint32_t q : preds[pc]) hit = hit || (def[q] > 0 && ((reads >> def[q]) & 1u));
+        if (!hit) continue;
+        const bool dynamic = pc == (p.entry & kMask) || targets.count(pc) || !in.count((pc - 8u) & kMask);
+        delay[pc] = dynamic ? 2 : 1;
+        for (std::uint32_t q : preds[pc]) {
+            if (def[q] > 0) keep_bk.insert(q);
+            if (dynamic) set_bi.insert(q);
+        }
+    }
     std::set<int> shadowed;
     for (std::uint32_t pc : pcs)
         for (int reg : upper(word(p.code, pc + 4), true).shadow_reads) shadowed.insert(reg);
     name = std::format("vu1_{:016X}", p.key);
-    std::string o = std::format("void {}(Vu0Regs &r, std::uint8_t *mem) {{\n    FlagPipe fl;\n    fl.start(r);\n    bool pend = false, pendj = false, ending = false;\n    std::uint32_t jpc = 0;\n    std::uint16_t bk = 0, next_bk = 0;\n    unsigned bi = 0, next_bi = 0;\n    (void)pend;\n    (void)pendj;\n    (void)ending;\n    (void)jpc;\n    (void)bk;\n    (void)next_bk;\n    (void)bi;\n    (void)next_bi;\n",
+    std::string o = std::format("void {}(Vu0Regs &r, std::uint8_t *mem) {{\n    FlagPipe fl;\n    fl.start(r);\n    bool pend = false, pendj = false, ending = false;\n    std::uint32_t jpc = 0;\n    (void)pend;\n    (void)pendj;\n    (void)ending;\n    (void)jpc;\n",
                                 name);
+    if (!delay.empty()) o += "    std::uint16_t bk = 0, next_bk = 0;\n    unsigned bi = 0;\n    (void)bk;\n    (void)next_bk;\n    (void)bi;\n";
     for (int reg : shadowed) o += std::format("    v4u {} = vfix(vload({}));\n", shadow(reg), raw(reg));
     o += std::format("    goto {};\n", label(p.entry & kMask));
     for (std::uint32_t pc : pcs) {
@@ -544,21 +575,21 @@ std::string generate(const Program &p, std::string &name) {
         for (std::int64_t s : successors(pc)) out_live = out_live || s < 0 || !in.count(static_cast<std::uint32_t>(s)) || live_in[static_cast<std::uint32_t>(s)];
         const Upper u = upper(hi, any_status ? true : (any_flags && out_live));
         const Lower &l = lowers[pc];
-        // Save the VI write for the next executed instruction, including
-        // taken branches. Branch operands use the previous instruction's view.
-        const int written = (hi & 0x80000000u) || ps2::vu::branch_delay_exempt(lo) ? -1 : vi_written(l.code);
-        std::string body = "next_bi = 0; ";
-        if (written > 0) body += std::format("next_bk = r.vi[{}]; next_bi = {}; ", written, written);
+        std::string body;
+        if (keep_bk.count(pc)) body += std::format("next_bk = r.vi[{}]; ", def[pc]);
         body += u.pre;
         std::string lcode = l.code;
-        if (l.branch) {
-            for (int reg = 1; reg < 16; ++reg)
-                replace_all(lcode, std::format("r.vi[{}]", reg), std::format("(bi == {} ? bk : r.vi[{}])", reg, reg));
+        if (const auto d = delay.find(pc); d != delay.end()) {
+            for (int reg = 1; reg < 16; ++reg) {
+                if (d->second == 2) replace_all(lcode, std::format("r.vi[{}]", reg), std::format("(bi == {} ? bk : r.vi[{}])", reg, reg));
+                else if (reg == def[(pc - 8u) & kMask]) replace_all(lcode, std::format("r.vi[{}]", reg), "bk");
+            }
         }
         if (hi & 0x80000000u) body += std::format("r.i = {}u; ", lo);
         else if (!l.supported) body += std::format("vu::interpret(1, {}u); return; ", pc);
         else body += lcode;
-        body += "bk = next_bk; bi = next_bi; ";
+        if (keep_bk.count(pc)) body += "bk = next_bk; ";
+        if (set_bi.count(pc)) body += std::format("bi = {}u; ", std::max(def[pc], 0));
         body += u.post;
         o += std::format("{}: {{ ++fl.t; ", label(pc));
         if (any_q && ps2::vu::reads_q(hi)) {
