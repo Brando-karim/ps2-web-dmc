@@ -138,10 +138,23 @@ void time_frames() {
     }
 }
 
+void apply_patches(bool boot) {
+    for (const Patch &p : g_options.patches) {
+        if (boot ? p.place == 1 : p.place == 0) continue;
+        switch (p.bytes) {
+        case 1: st8(p.address, static_cast<std::uint8_t>(p.value)); break;
+        case 2: st16(p.address, static_cast<std::uint16_t>(p.value)); break;
+        case 4: st32(p.address, static_cast<std::uint32_t>(p.value)); break;
+        default: st64(p.address, p.value); break;
+        }
+    }
+}
+
 void vblank() {
     ++g_frames;
     time_frames();
     apply_presses();
+    apply_patches(false);
     if (g_options.on_vblank) g_options.on_vblank();
     iop::sio2::flush_cards();
     if (g_options.trace_iop_modules && g_frames % 25 == 0) std::fprintf(stderr, "[frame] %llu prims %llu\n", static_cast<unsigned long long>(g_frames), static_cast<unsigned long long>(gs::primitives_drawn()));
@@ -384,6 +397,7 @@ void boot(std::uint32_t entry, const std::vector<std::string> &args) {
     }
     store<std::uint32_t>(g_ram + argv + 4 * guest_args.size(), 0);
     kernel::start_main_thread(entry, 0, static_cast<std::uint32_t>(guest_args.size()), argv);
+    apply_patches(true);
     schedule(hw::kEventVblank, frame_cycles(), vblank);
 }
 
@@ -530,6 +544,18 @@ bool parse_press(const std::string &spec, Press &press) {
         if (plus == std::string::npos) break;
         start = plus + 1;
     }
+    return true;
+}
+
+bool load_patches(const std::string &path) {
+    std::FILE *f = std::fopen(path.c_str(), "r");
+    if (!f) return false;
+    unsigned place = 0, bytes = 0;
+    unsigned long address = 0;
+    unsigned long long value = 0;
+    while (std::fscanf(f, "%u %lx %u %llx", &place, &address, &bytes, &value) == 4)
+        g_options.patches.push_back({static_cast<std::uint8_t>(place), static_cast<std::uint8_t>(bytes), static_cast<std::uint32_t>(address), value});
+    std::fclose(f);
     return true;
 }
 

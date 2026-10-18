@@ -24,7 +24,7 @@ int usage() {
                  "              [--disc image.iso] [--memcard card.ps2] [--pal | --ntsc] [--trace-syscalls] [--trace-io] [--trace-threads]\n"
                  "              [--trace-iop] [--trace-iop-hle] [--frames-dir dir] [--frame-every n]\n"
                  "              [--press frame:button[+button][:frames]]... [--window] [--fullscreen]\n"
-                 "              [--save-state frame:file] [--load-state file]\n");
+                 "              [--save-state frame:file] [--load-state file] [--widescreen] [--patches file]\n");
     return 2;
 }
 
@@ -45,6 +45,10 @@ int main(int argc, char **argv) {
         }
         else if (a == "--misses" && i + 1 < argc) ps2::g_options.misses_path = argv[++i];
         else if (a == "--trace-syscalls") ps2::g_options.trace_syscalls = true;
+        else if (a == "--widescreen") ps2::g_options.widescreen = true;
+        else if (a == "--patches" && i + 1 < argc) {
+            if (!ps2::load_patches(argv[++i])) return usage();
+        }
         else if (a == "--trace-io") ps2::g_options.trace_io = true;
         else if (a == "--trace-threads") ps2::g_options.trace_threads = true;
         else if (a == "--disc" && i + 1 < argc) ps2::g_options.disc_path = argv[++i];

@@ -20,12 +20,18 @@ options:
   --rounds N         exploring runs at most (default 8)
   --no-explore       translate and build without running the game
   --native-only      skip the browser build and the Emscripten SDK it needs
+  --pnach FILE       apply a PCSX2 patch file, repeatable; patches that land in
+                     the executable are translated with it, the rest are
+                     written into memory at boot or every frame
+  --pnach-section S  also apply the patches under [S] in those files, the way
+                     enabling them in PCSX2 does; lines outside any section
+                     always apply
 EOF
 }
 
 [ $# -ge 2 ] || { usage; exit 2; }
 name="$1"; source_path="$2"; shift 2
-frames=3600; rounds=8; explore=1; web=1; presses=()
+frames=3600; rounds=8; explore=1; web=1; presses=(); pnach=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --frames) frames="$2"; shift ;;
@@ -33,6 +39,8 @@ while [ $# -gt 0 ]; do
     --rounds) rounds="$2"; shift ;;
     --no-explore) explore=0 ;;
     --native-only) web=0 ;;
+    --pnach) pnach+=("$(realpath "$2")"); shift ;;
+    --pnach-section) pnach=(--section "$2" "${pnach[@]}"); shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -81,6 +89,7 @@ program=${program%;*}
 [ -n "$program" ] || { echo "SYSTEM.CNF names no BOOT2 program" >&2; exit 1; }
 python3 -I "$here/disc.py" extract "$iso" "$game/disc" "$program" > /dev/null
 echo "boots $boot"
+echo "PCSX2 patch files for it end in _$(python3 -I "$here/pnach.py" crc "$game/disc/$program").pnach"
 
 echo "== [2/6] executable"
 elf="$game/disc/$program"
@@ -90,6 +99,12 @@ elif python3 -I "$here/disc.py" list "$iso" | awk '{print $4}' | grep -qx CORE.G
   python3 -I "$here/disc.py" extract "$iso" "$game/disc" CORE.GT4 > /dev/null
   python3 -I "$here/gt4_core.py" "$game/disc/CORE.GT4" "$game/core.elf" > /dev/null
   elf="$game/core.elf"
+fi
+rm -rf "$game/patched" "$game/patches.txt"
+if [ ${#pnach[@]} -gt 0 ]; then
+  mkdir -p "$game/patched"
+  python3 -I "$here/pnach.py" apply "$elf" "$game/patched/$(basename "$elf")" "$game/patches.txt" "${pnach[@]}"
+  elf="$game/patched/$(basename "$elf")"
 fi
 echo "${elf#$ROOT/}"
 modules=()
@@ -171,4 +186,6 @@ if [ "$web" = 1 ]; then
   printf 'Done. Serve it with:  python3 scripts/serve.py %q %q\n' "build/web-$name" "games/$name/disc.iso"
   echo "and open http://localhost:8620/"
 fi
-printf 'Play it natively:  %q %q --disc %q --window\n' "build/native-$name/ps2run" "${elf#$ROOT/}" "games/$name/disc.iso"
+play=$(printf '%q %q --disc %q --window' "build/native-$name/ps2run" "${elf#$ROOT/}" "games/$name/disc.iso")
+[ -f "$game/patches.txt" ] && play="$play --patches $(printf '%q' "games/$name/patches.txt")"
+echo "Play it natively:  $play"

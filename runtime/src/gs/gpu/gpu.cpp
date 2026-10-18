@@ -905,7 +905,8 @@ void submit(WGPUTextureView present_view = nullptr) {
         rd.colorAttachments = &color;
         WGPURenderPassEncoder rp = wgpuCommandEncoderBeginRenderPass(enc, &rd);
         const float w = static_cast<float>(g_surface_width), h = static_cast<float>(g_surface_height);
-        const float vw = std::min(w, h * 4.0f / 3.0f), vh = vw * 3.0f / 4.0f;
+        const float aspect = g_options.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
+        const float vw = std::min(w, h * aspect), vh = vw / aspect;
         wgpuRenderPassEncoderSetViewport(rp, (w - vw) * 0.5f, (h - vh) * 0.5f, vw, vh, 0.0f, 1.0f);
         wgpuRenderPassEncoderSetPipeline(rp, g_blit);
         wgpuRenderPassEncoderSetBindGroup(rp, 0, g_blit_group, 0, nullptr);
@@ -1744,7 +1745,8 @@ bool present(const DisplaySource &src) {
     const std::uint32_t param = push_params({src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, current});
     g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
     const float sw = static_cast<float>(g_surface_width), sh = static_cast<float>(g_surface_height);
-    const float vw = std::min(sw, sh * 4.0f / 3.0f), vh = vw * 3.0f / 4.0f;
+    const float aspect = g_options.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;
+    const float vw = std::min(sw, sh * aspect), vh = vw / aspect;
     const std::uint32_t blit[8] = {src.width * g_scale, src.height * g_scale, current, previous, blend ? 1u : 0u, static_cast<std::uint32_t>(vw), static_cast<std::uint32_t>(vh), 0};
     wgpuQueueWriteBuffer(g_queue, g_blit_params, 0, blit, sizeof blit);
     ++g_field;

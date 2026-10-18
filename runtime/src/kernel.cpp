@@ -380,6 +380,7 @@ void reset() {
     g_next_handler = 1;
     g_in_handler = g_reschedule = false;
     g_pending_alarms.clear();
+    g_osd_config = g_options.widescreen ? 2u << 1 : 0u;
     std::memset(g_ram + kSyscallTable, 0, 0x400);
 }
 

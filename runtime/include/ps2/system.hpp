@@ -22,6 +22,13 @@ struct Press {
     std::uint8_t stick = 0;
 };
 
+struct Patch {
+    std::uint8_t place;
+    std::uint8_t bytes;
+    std::uint32_t address;
+    std::uint64_t value;
+};
+
 struct AxisPress {
     std::uint64_t frame;
     std::uint32_t frames;
@@ -34,6 +41,7 @@ struct Options {
     bool trace_io = false;
     bool trace_threads = false;
     bool pal = true;
+    bool widescreen = false;
     bool rate_forced = false;
     std::uint64_t max_frames = 0;
     std::string misses_path;
@@ -44,6 +52,7 @@ struct Options {
     std::uint32_t frame_every = 60;
     std::vector<Press> presses;
     std::vector<AxisPress> axis_presses;
+    std::vector<Patch> patches;
     std::function<void()> on_vblank;
     std::function<void(const std::string &name, const std::uint8_t *code, std::size_t size)> on_vu_program;
     std::string memcard_path;
@@ -119,6 +128,7 @@ void wake_render_thread();
 bool copy_frame(std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height);
 bool parse_press(const std::string &spec, Press &press);
 bool parse_axis(const std::string &spec, AxisPress &press);
+bool load_patches(const std::string &path);
 double gpu_busy_ms();
 void browser_yield();
 std::uint64_t frames_run();

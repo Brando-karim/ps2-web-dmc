@@ -98,7 +98,7 @@ EM_JS(void, ps2web_frame_done, (), {
 EM_ASYNC_JS(void, ps2web_wait_shown, (), {
     if (Module.shownPending) await new Promise((resolve) => Module.shownWaiters.push(resolve));
 });
-EM_JS(void, ps2web_blit, (const std::uint32_t *rgba, int width, int height), {
+EM_JS(void, ps2web_blit, (const std::uint32_t *rgba, int width, int height, int wide), {
     const canvas = Module.canvas;
     if (!Module.blitContext) Module.blitContext = canvas.getContext('2d');
     if (!Module.blitImage || Module.blitImage.width !== width || Module.blitImage.height !== height) {
@@ -108,8 +108,9 @@ EM_JS(void, ps2web_blit, (const std::uint32_t *rgba, int width, int height), {
     Module.blitImage.data.set(HEAPU8.subarray(rgba, rgba + width * height * 4));
     Module.blitSource.getContext('2d').putImageData(Module.blitImage, 0, 0);
     const ctx = Module.blitContext;
-    const scale = Math.min(canvas.width / 4, canvas.height / 3);
-    const w = scale * 4, h = scale * 3;
+    const across = wide ? 16 : 4, down = wide ? 9 : 3;
+    const scale = Math.min(canvas.width / across, canvas.height / down);
+    const w = scale * across, h = scale * down;
     const sx = Math.max(1, Math.floor(w / width)), sy = Math.max(1, Math.floor(h / height));
     let source = Module.blitSource;
     if (sx > 1 || sy > 1) {
@@ -295,6 +296,7 @@ void *emulate(void *data) {
     const Launch &launch = *static_cast<const Launch *>(data);
     if (g_disc_size && !ps2::disc::open("disc", g_disc_size, read_disc, disc_ready)) std::fprintf(stderr, "[web] cannot read the disc image\n");
     std::uint32_t entry = 0;
+    ps2::load_patches("/game/patches.txt");
     if (!ps2::load_elf("/game/core.elf", entry)) {
         std::fprintf(stderr, "cannot load the game executable\n");
         return nullptr;
@@ -356,6 +358,7 @@ int main(int argc, char **argv) {
         const std::string a = argv[i];
         if (a == "--arg" && i + 1 < argc) launch.args.push_back(argv[++i]);
         else if (a == "--frames" && i + 1 < argc) ps2::g_options.max_frames = std::strtoull(argv[++i], nullptr, 10);
+        else if (a == "--widescreen") ps2::g_options.widescreen = true;
         else if (a == "--press" && i + 1 < argc) {
             ps2::Press press;
             if (ps2::parse_press(argv[++i], press)) ps2::g_options.presses.push_back(press);
@@ -428,7 +431,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     const std::function<void(const std::uint32_t *, std::uint32_t, std::uint32_t)> blit = [](const std::uint32_t *rgba, std::uint32_t width, std::uint32_t height) {
-        ps2web_blit(rgba, static_cast<int>(width), static_cast<int>(height));
+        ps2web_blit(rgba, static_cast<int>(width), static_cast<int>(height), ps2::g_options.widescreen ? 1 : 0);
     };
     const std::function<void(const std::uint32_t *, std::uint32_t, std::uint32_t)> none;
     const std::function<void()> wait_shown = [] {
