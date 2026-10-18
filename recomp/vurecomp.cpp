@@ -550,7 +550,7 @@ std::string generate(const Program &p, std::string &name) {
         if (written > 0) body += std::format("next_bk = r.vi[{}]; next_bi = {}; ", written, written);
         body += u.pre;
         std::string lcode = l.code;
-        if (l.branch || l.jump) {
+        if (l.branch) {
             for (int reg = 1; reg < 16; ++reg)
                 replace_all(lcode, std::format("r.vi[{}]", reg), std::format("(bi == {} ? bk : r.vi[{}])", reg, reg));
         }

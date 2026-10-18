@@ -443,18 +443,17 @@ private:
         }
         switch (w >> 25) {
         case 0x04: return dest ? it : 0;
-        case 0x08: case 0x09: case 0x21: case 0x25: return it;
+        case 0x08: case 0x09: return it;
         default: return 0;
         }
     }
 
     std::uint32_t branch_reads(std::uint32_t pc) {
-        const LowerInfo &l = lowers_[pc];
-        if (!l.branch && !l.jump) return 0;
+        if (!lowers_[pc].branch) return 0;
         const std::uint32_t w = word(pc);
         const unsigned it = (w >> 16) & 15u, is = (w >> 11) & 15u;
         switch (w >> 25) {
-        case 0x24: case 0x25: case 0x2C: case 0x2D: case 0x2E: case 0x2F: return (1u << is) & ~1u;
+        case 0x2C: case 0x2D: case 0x2E: case 0x2F: return (1u << is) & ~1u;
         case 0x28: case 0x29: return ((1u << is) | (1u << it)) & ~1u;
         default: return 0;
         }
@@ -1666,7 +1665,7 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
         break;
     case 0x24:
     case 0x25:
-        branch_vi(is);
+        vi(is);
         c_.i32c(8);
         c_.op(kOpMul);
         c_.i32c(kMask);

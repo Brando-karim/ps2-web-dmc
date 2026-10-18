@@ -671,8 +671,8 @@ void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool 
     case 0x1C: store_vi(r, it, clip_flags() & 0xFFFu); break;
     case 0x20: branch_to(target); break;
     case 0x21: store_vi(r, it, (pc + 16u) / 8u); branch_to(target); break;
-    case 0x24: branch_to(static_cast<std::uint32_t>(bvi(is)) * 8u); break;
-    case 0x25: { const std::uint32_t t = static_cast<std::uint32_t>(bvi(is)) * 8u; store_vi(r, it, (pc + 16u) / 8u); branch_to(t); break; }
+    case 0x24: branch_to(static_cast<std::uint32_t>(r.vi[is]) * 8u); break;
+    case 0x25: { const std::uint32_t t = static_cast<std::uint32_t>(r.vi[is]) * 8u; store_vi(r, it, (pc + 16u) / 8u); branch_to(t); break; }
     case 0x28: if (bvi(is) == bvi(it)) branch_to(target); break;
     case 0x29: if (bvi(is) != bvi(it)) branch_to(target); break;
     case 0x2C: if (static_cast<std::int16_t>(bvi(is)) < 0) branch_to(target); break;

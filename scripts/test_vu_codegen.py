@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
             put(56, addi(2, 0, 1), unop | end);
             put(72, addi(2, 0, 2), unop | end);
         } else if (test >= 6) {
-            // JR/JALR use the saved operand; JALR may also overwrite it.
+            // JR/JALR read the operand without the delay; JALR also overwrites it.
             put(0, addi(1, 0, 1));
             put(8, ((test == 6 ? 0x24u : 0x25u) << 25) | (1u << 11) | (1u << 16), unop | end);
         } else {
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
                   "for (int i=0;i<4;++i) r.vf[1].w[i]=0xBF800000; r.vf[0].w[3]=0x3F800000;\n";
         if (test == 5) native << "r.vi[1]=0xFFFF;\n";
         native << std::format("vu1_{:016X}(r, mem);\n", test);
-        native << (test >= 6 ? "if (r.tpc != 16) return 1;\n" : test == 4 ? "if (r.mac != 0xF0 || r.status != 0x82) return 1;\n" : "if (r.vi[2] != 2) return 1;\n");
+        native << (test >= 6 ? "if (r.tpc != 8) return 1;\n" : test == 4 ? "if (r.mac != 0xF0 || r.status != 0x82) return 1;\n" : "if (r.vi[2] != 2) return 1;\n");
         native << "}\n";
     }
     native << "puts(\"8 native VU regressions passed\"); }\n";
@@ -104,7 +104,7 @@ for (let test = 0; test < 8; ++test) {
   env.clip = () => 1;
   new WebAssembly.Instance(mod, {env}).exports.run(r, 0x4000);
   if (test >= 6) {
-    if (view.getUint32(r + off.tpc, true) !== 16) throw Error(`Register jump regression ${test}`);
+    if (view.getUint32(r + off.tpc, true) !== 8) throw Error(`Register jump regression ${test}`);
   } else if (test === 4) {
     if (view.getUint32(r + off.mac, true) !== 0xF0 || view.getUint32(r + off.status, true) !== 0x82)
       throw Error('Exit flags were dropped');
