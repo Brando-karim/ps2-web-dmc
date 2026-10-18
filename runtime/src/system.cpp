@@ -101,6 +101,13 @@ void dump_frame() {
 }
 
 void apply_presses() {
+    if (!g_options.axis_presses.empty()) {
+        // Outside a hold the stick rests; within one it takes the given tilt.
+        std::uint8_t axes[4] = {0x80, 0x80, 0x80, 0x80};
+        for (const AxisPress &p : g_options.axis_presses)
+            if (g_frames >= p.frame && g_frames < p.frame + p.frames) axes[p.axis] = p.value;
+        for (int a = 0; a < 4; ++a) iop::sio2::set_axis(0, a, axes[a]);
+    }
     if (g_options.presses.empty()) return;
     std::uint16_t mask = 0;
     for (const Press &p : g_options.presses)
@@ -212,6 +219,7 @@ void halt(const std::string &reason) {
 }
 
 bool halted() { return g_halted; }
+const std::string &halt_reason() { return g_halt_reason; }
 
 namespace {
 
@@ -509,6 +517,29 @@ bool parse_press(const std::string &spec, Press &press) {
         start = plus + 1;
     }
     return true;
+}
+
+bool parse_axis(const std::string &spec, AxisPress &press) {
+    static const char *const kNames[4] = {"rx", "ry", "lx", "ly"};
+    std::size_t at = 0;
+    const auto field = [&](std::string &out) {
+        const auto colon = spec.find(':', at);
+        if (colon == std::string::npos) return false;
+        out = spec.substr(at, colon - at);
+        at = colon + 1;
+        return true;
+    };
+    std::string frame, axis, value;
+    if (!field(frame) || !field(axis)) return false;
+    const auto tail = spec.find(':', at);
+    value = spec.substr(at, tail == std::string::npos ? std::string::npos : tail - at);
+    press.frame = std::strtoull(frame.c_str(), nullptr, 10);
+    for (int i = 0; i < 4; ++i)
+        if (axis == kNames[i]) press.axis = i;
+    press.value = static_cast<std::uint8_t>(std::strtoul(value.c_str(), nullptr, 0));
+    press.frames = 6;
+    if (tail != std::string::npos) press.frames = static_cast<std::uint32_t>(std::strtoul(spec.c_str() + tail + 1, nullptr, 10));
+    return press.frame || press.frames;
 }
 
 double gpu_busy_ms() { return gs::gpu_busy_ms(); }

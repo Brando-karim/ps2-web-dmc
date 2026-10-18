@@ -21,6 +21,13 @@ struct Press {
     std::uint16_t buttons;
 };
 
+struct AxisPress {
+    std::uint64_t frame;
+    std::uint32_t frames;
+    int axis;
+    std::uint8_t value;
+};
+
 struct Options {
     bool trace_syscalls = false;
     bool trace_io = false;
@@ -35,6 +42,7 @@ struct Options {
     std::string frames_dir;
     std::uint32_t frame_every = 60;
     std::vector<Press> presses;
+    std::vector<AxisPress> axis_presses;
     std::function<void()> on_vblank;
     std::function<void(const std::string &name, const std::uint8_t *code, std::size_t size)> on_vu_program;
     std::string memcard_path;
@@ -77,6 +85,7 @@ bool save_state(const std::string &path);
 bool load_state(const std::string &path);
 bool load_state(const std::uint8_t *data, std::size_t size);
 bool halted();
+const std::string &halt_reason();
 std::uint64_t frame_count();
 
 bool display_frame(std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height);
@@ -108,6 +117,7 @@ void wait_render_work(int timeout_ms);
 void wake_render_thread();
 bool copy_frame(std::vector<std::uint32_t> &rgba, std::uint32_t &width, std::uint32_t &height);
 bool parse_press(const std::string &spec, Press &press);
+bool parse_axis(const std::string &spec, AxisPress &press);
 double gpu_busy_ms();
 void browser_yield();
 std::uint64_t frames_run();

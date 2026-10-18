@@ -555,6 +555,12 @@ var Module = {
   noSurface: params.has('nosurface'),
   noCard: params.has('nocard'),
   presentCopy: params.has('copy'),
+  onHalt: (reason) => {
+    clearTimeout(noteTimer);
+    noteTimer = 0;
+    statusEl.textContent = 'Halted: ' + reason;
+    statusEl.style.color = '#f66';
+  },
   print: (text) => console.log(text),
   printErr: (text) => console.log(text),
   setStatus: (text) => {
