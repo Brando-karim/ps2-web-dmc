@@ -547,8 +547,10 @@ bool parse_axis(const std::string &spec, AxisPress &press) {
     const auto tail = spec.find(':', at);
     value = spec.substr(at, tail == std::string::npos ? std::string::npos : tail - at);
     press.frame = std::strtoull(frame.c_str(), nullptr, 10);
+    press.axis = -1;
     for (int i = 0; i < 4; ++i)
         if (axis == kNames[i]) press.axis = i;
+    if (press.axis < 0) return false;
     press.value = static_cast<std::uint8_t>(std::strtoul(value.c_str(), nullptr, 0));
     press.frames = 6;
     if (tail != std::string::npos) press.frames = static_cast<std::uint32_t>(std::strtoul(spec.c_str() + tail + 1, nullptr, 10));
