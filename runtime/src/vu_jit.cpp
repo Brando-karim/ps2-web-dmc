@@ -29,7 +29,7 @@ constexpr ImportType kImportTypes[kImports] = {
 };
 
 enum Local : std::uint32_t {
-    kR, kMem, kPend, kPendj, kEnding, kJpc, kPcw, kExit, kUclip, kTmp, kTmp2, kMacv, kStat, kSlot, kT, kSign, kExp, kVi0, kI32Locals = kVi0 + 16,
+    kR, kMem, kPend, kPendj, kEnding, kJpc, kPcw, kExit, kUclip, kTmp, kTmp2, kMacv, kStat, kSlot, kT, kSign, kExp, kBi, kBk, kBkNext, kVi0, kI32Locals = kVi0 + 16,
     kBits = kI32Locals, kUv, kV0, kV1, kV2, kV3, kV4, kV5, kShadow0
 };
 constexpr std::uint32_t kI32Count = kI32Locals - 2;
@@ -385,7 +385,12 @@ private:
     std::map<std::uint32_t, std::uint32_t> case_of_;
     std::uint32_t cases_ = 0, case_index_ = 0;
     std::uint32_t vi_used_ = 0, vi_written_ = 0;
-    bool any_status_ = false, any_flags_ = false;
+    std::map<std::uint32_t, unsigned> vi_def_;
+    std::map<std::uint32_t, int> delay_;
+    std::set<std::uint32_t> keep_bk_, set_bi_;
+    int delay_mode_ = 0;
+    unsigned delay_reg_ = 0;
+    bool any_status_ = false;
 
     std::uint32_t word(std::uint32_t at) const {
         std::uint32_t v;
@@ -420,6 +425,39 @@ private:
             if (pl.branch && in_.count(pl.target)) s.push_back(pl.target);
         }
         return s;
+    }
+
+    unsigned vi_def(std::uint32_t pc) {
+        const std::uint32_t w = word(pc);
+        if ((word(pc + 4) & 0x80000000u) || !lowers_[pc].supported || branch_delay_exempt(w)) return 0;
+        const unsigned dest = (w >> 21) & 15u, it = (w >> 16) & 15u, is = (w >> 11) & 15u, id = (w >> 6) & 15u;
+        if ((w >> 25) == 0x40u) {
+            const unsigned funct = w & 63u;
+            if (funct < 0x3C) return funct == 0x32 ? it : (funct == 0x30 || funct == 0x31 || funct == 0x34 || funct == 0x35) ? id : 0;
+            switch (((w >> 6) & 31u) * 4u + (funct & 3u)) {
+            case 0x34: case 0x36: return is;
+            case 0x35: case 0x37: case 0x3C: case 0x68: case 0x69: return it;
+            case 0x3E: return dest ? it : 0;
+            default: return 0;
+            }
+        }
+        switch (w >> 25) {
+        case 0x04: return dest ? it : 0;
+        case 0x08: case 0x09: case 0x21: case 0x25: return it;
+        default: return 0;
+        }
+    }
+
+    std::uint32_t branch_reads(std::uint32_t pc) {
+        const LowerInfo &l = lowers_[pc];
+        if (!l.branch && !l.jump) return 0;
+        const std::uint32_t w = word(pc);
+        const unsigned it = (w >> 16) & 15u, is = (w >> 11) & 15u;
+        switch (w >> 25) {
+        case 0x24: case 0x25: case 0x2C: case 0x2D: case 0x2E: case 0x2F: return (1u << is) & ~1u;
+        case 0x28: case 0x29: return ((1u << is) | (1u << it)) & ~1u;
+        default: return 0;
+        }
     }
 
     int lower_write(std::uint32_t pc) {
@@ -540,6 +578,20 @@ private:
         }
         vi_used_ |= 1u << i;
         c_.get(kVi0 + i);
+    }
+
+    void branch_vi(unsigned i) {
+        if (!i || !delay_mode_ || (delay_mode_ == 1 && i != delay_reg_)) {
+            vi(i);
+            return;
+        }
+        c_.get(kBk);
+        if (delay_mode_ == 1) return;
+        vi(i);
+        c_.get(kBi);
+        c_.i32c(i);
+        c_.op(kOpEq);
+        c_.op(kOpSelect);
     }
 
     template <typename F>
@@ -1614,7 +1666,7 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
         break;
     case 0x24:
     case 0x25:
-        vi(is);
+        branch_vi(is);
         c_.i32c(8);
         c_.op(kOpMul);
         c_.i32c(kMask);
@@ -1626,14 +1678,14 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
         break;
     case 0x28:
     case 0x29:
-        vi(is);
-        vi(it);
+        branch_vi(is);
+        branch_vi(it);
         c_.op((w >> 25) == 0x28 ? kOpEq : kOpNe);
         c_.set(kPend);
         break;
     case 0x2C: case 0x2D: case 0x2E: case 0x2F: {
         static const std::uint8_t kCompare[4] = {kOpLtS, kOpGtS, kOpLeS, kOpGeS};
-        vi(is);
+        branch_vi(is);
         c_.op(kOpExt16);
         c_.i32c(0);
         c_.op(kCompare[(w >> 25) - 0x2C]);
@@ -1648,7 +1700,7 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
 void Translator::instruction(std::uint32_t pc, std::uint32_t following) {
     const std::uint32_t lo = word(pc), hi = word(pc + 4);
     const Up u = decode_upper(hi);
-    const bool flags_live = any_status_ ? true : (any_flags_ && out_live(pc));
+    const bool flags_live = any_status_ || out_live(pc);
     const LowerInfo &li = lowers_[pc];
 
     c_.get(kT);
@@ -1661,12 +1713,29 @@ void Translator::instruction(std::uint32_t pc, std::uint32_t following) {
         else if (kind == kQDynamic) sync_q();
     }
     upper_pre(u, flags_live);
+    const unsigned def = vi_def_[pc];
+    if (keep_bk_.count(pc)) {
+        vi(def);
+        c_.set(kBkNext);
+    }
+    const auto delay = delay_.find(pc);
+    delay_mode_ = delay == delay_.end() ? 0 : delay->second;
+    delay_reg_ = delay_mode_ == 1 ? vi_def_[(pc - 8u) & kMask] : 0;
     if (hi & 0x80000000u) {
         c_.get(kR);
         c_.i32c(lo);
         c_.store(kOffI);
     } else if (!li.supported || !lower(lo, pc)) {
         leave(pc);
+    }
+    delay_mode_ = 0;
+    if (keep_bk_.count(pc)) {
+        c_.get(kBkNext);
+        c_.set(kBk);
+    }
+    if (set_bi_.count(pc)) {
+        c_.i32c(def);
+        c_.set(kBi);
     }
     upper_post(u, flags_live);
     const int written = lower_write(pc);
@@ -1797,7 +1866,6 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
         LowerInfo l;
         if (!(word(pc + 4) & 0x80000000u)) l = analyze_lower(word(pc), pc);
         any_status_ = any_status_ || l.reads_status;
-        any_flags_ = any_flags_ || l.reads_flags;
         lowers_[pc] = l;
     }
     for (std::uint32_t pc : pcs_) live_in_[pc] = false;
@@ -1827,6 +1895,23 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
         if (l.branch && in_.count(l.target)) leaders.insert(l.target);
     }
     for (std::uint32_t pc : leaders) case_of_[pc] = cases_++;
+    std::map<std::uint32_t, std::vector<std::uint32_t>> preds;
+    for (std::uint32_t pc : pcs_) {
+        vi_def_[pc] = vi_def(pc);
+        for (std::uint32_t s : flow(pc)) preds[s].push_back(pc);
+    }
+    for (std::uint32_t pc : pcs_) {
+        const std::uint32_t reads = branch_reads(pc);
+        bool hit = false;
+        for (std::uint32_t p : preds[pc]) hit = hit || (vi_def_[p] && ((reads >> vi_def_[p]) & 1u));
+        if (!hit) continue;
+        const bool dynamic = case_of_.count(pc) != 0;
+        delay_[pc] = dynamic ? 2 : 1;
+        for (std::uint32_t p : preds[pc]) {
+            if (vi_def_[p]) keep_bk_.insert(p);
+            if (dynamic) set_bi_.insert(p);
+        }
+    }
 
     std::set<int> shadowed;
     for (std::uint32_t pc : pcs_)

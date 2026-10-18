@@ -34,6 +34,9 @@ struct Unit {
     std::uint32_t data_qwords;
     std::uint32_t tpc;
     vuops::FlagPipe *pipe = nullptr;
+    // What a branch reads of the integer registers: the values from before the
+    // previous instruction when that one wrote them (see BranchView).
+    const std::uint16_t *branch_vi = nullptr;
 };
 
 Vu0Regs g_vu1;
@@ -69,6 +72,7 @@ std::uint32_t q_delay_of(const Unit &u, std::uint32_t pc, std::uint32_t latency)
 }
 
 std::uint64_t g_reported = 0;
+bool g_reference_dry = false;
 
 Unit unit_of(int n) {
     if (n == 0) return Unit{&g_cpu.vu0, g_vu0_code, g_vu0_mem, 4095u, 256u, g_cpu.vu0.tpc};
@@ -441,6 +445,7 @@ float u2f(std::uint32_t v) {
 }
 
 void xgkick(Unit &u, std::uint32_t address) {
+    if (g_reference_dry) return;
     std::uint8_t buffer[16 * 1024 + 16];
     std::uint32_t q = address & (u.data_qwords - 1), count = 0;
     bool done = false;
@@ -463,6 +468,26 @@ void xgkick(Unit &u, std::uint32_t address) {
     gif::transfer(1, buffer, count);
 }
 
+// A VU branch that reads an integer register the instruction right before it
+// wrote sees the value from before that write: the integer pipeline commits
+// after the branch unit reads, and compiled game code counts on it (a loop
+// that decrements its counter just before testing it runs one pass more). A
+// flag reading instruction (FMAND, FCAND...) writing the register does not
+// delay it. PCSX2 calls this the branch VI delay.
+struct BranchView {
+    std::uint16_t before[16] = {};
+    bool live = false;
+
+    // Before an instruction runs: what its branch, if it is one, reads.
+    void arm(Unit &u) const { u.branch_vi = live ? before : nullptr; }
+    // Keep the registers as they are before this instruction for the next one.
+    void snapshot(const Vu0Regs &r, std::uint16_t (&now)[16]) const { std::memcpy(now, r.vi, sizeof now); }
+    void commit(const std::uint16_t (&was)[16], std::uint32_t lo, bool lower_ran) {
+        std::memcpy(before, was, sizeof before);
+        live = lower_ran && !branch_delay_exempt(lo);
+    }
+};
+
 void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool &branch) {
     Vu0Regs &r = *u.regs;
     const unsigned dest = (w >> 21) & 15u, it = (w >> 16) & 15u, is = (w >> 11) & 15u, id = (w >> 6) & 15u;
@@ -475,6 +500,7 @@ void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool 
         npc = target & u.code_mask;
         branch = true;
     };
+    const auto bvi = [&](unsigned k) -> std::uint16_t { return u.branch_vi ? u.branch_vi[k] : r.vi[k]; };
     if ((w >> 25) == 0x40u) {
         const unsigned funct = w & 63u;
         if (funct < 0x3C) {
@@ -645,14 +671,14 @@ void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool 
     case 0x1C: store_vi(r, it, clip_flags() & 0xFFFu); break;
     case 0x20: branch_to(target); break;
     case 0x21: store_vi(r, it, (pc + 16u) / 8u); branch_to(target); break;
-    case 0x24: branch_to(static_cast<std::uint32_t>(r.vi[is]) * 8u); break;
-    case 0x25: { const std::uint32_t t = static_cast<std::uint32_t>(r.vi[is]) * 8u; store_vi(r, it, (pc + 16u) / 8u); branch_to(t); break; }
-    case 0x28: if (r.vi[is] == r.vi[it]) branch_to(target); break;
-    case 0x29: if (r.vi[is] != r.vi[it]) branch_to(target); break;
-    case 0x2C: if (static_cast<std::int16_t>(r.vi[is]) < 0) branch_to(target); break;
-    case 0x2D: if (static_cast<std::int16_t>(r.vi[is]) > 0) branch_to(target); break;
-    case 0x2E: if (static_cast<std::int16_t>(r.vi[is]) <= 0) branch_to(target); break;
-    case 0x2F: if (static_cast<std::int16_t>(r.vi[is]) >= 0) branch_to(target); break;
+    case 0x24: branch_to(static_cast<std::uint32_t>(bvi(is)) * 8u); break;
+    case 0x25: { const std::uint32_t t = static_cast<std::uint32_t>(bvi(is)) * 8u; store_vi(r, it, (pc + 16u) / 8u); branch_to(t); break; }
+    case 0x28: if (bvi(is) == bvi(it)) branch_to(target); break;
+    case 0x29: if (bvi(is) != bvi(it)) branch_to(target); break;
+    case 0x2C: if (static_cast<std::int16_t>(bvi(is)) < 0) branch_to(target); break;
+    case 0x2D: if (static_cast<std::int16_t>(bvi(is)) > 0) branch_to(target); break;
+    case 0x2E: if (static_cast<std::int16_t>(bvi(is)) <= 0) branch_to(target); break;
+    case 0x2F: if (static_cast<std::int16_t>(bvi(is)) >= 0) branch_to(target); break;
     default:
         if (g_reported++ < 32) std::fprintf(stderr, "[vu] lower 0x%08X at 0x%04X\n", w, pc);
         break;
@@ -687,12 +713,14 @@ std::unordered_map<std::uint64_t, ProgramFn> g_programs;
 struct Candidate {
     std::vector<std::uint32_t> runs;
     std::vector<std::uint8_t> code;
+    std::uint64_t key = 0;
     ProgramFn function = nullptr;
     ProgramFn jit = nullptr;
 };
 
 struct EntryCache {
     std::uint32_t generation = 0;
+    std::uint64_t key = 0;
     ProgramFn function = nullptr;
     ProgramFn jit = nullptr;
     std::vector<Candidate> candidates;
@@ -805,6 +833,7 @@ void run_entry(int unit, std::uint32_t pc);
 
 bool g_chaining = false;
 std::int64_t g_chained = -1;
+std::uint64_t g_last_key = 0;
 
 void interpret(int unit, std::uint32_t pc) {
     if (unit == 1 && g_capture) {
@@ -830,15 +859,71 @@ void interpret(int unit, std::uint32_t pc) {
 }
 
 void run_entry(int unit, std::uint32_t pc) {
-    static const bool interpret_only = std::getenv("PS2_VU_INTERPRET") != nullptr;
+    // Compiled programs are the default; retain an interpreter override for
+    // differential checks and diagnosing newly recorded programs.
+    static const bool interpret_only = [] {
+        const char *env = std::getenv("PS2_VU_JIT");
+        return env && std::strcmp(env, "0") == 0;
+    }();
     static const bool count = std::getenv("PS2_VU_COUNT") != nullptr;
     static std::uint64_t compiled = 0, interpreted = 0;
     static std::unordered_map<std::uint32_t, std::uint64_t> misses;
     if (unit == 1 && !interpret_only) {
-        if (const ProgramFn fn = lookup(pc)) {
+        const ProgramFn fn = lookup(pc);
+        if (fn) {
             ++compiled;
             const ProgramFn jit = g_entries[(pc & 16383u) >> 3].jit;
             static std::uint64_t sampled = 0;
+            static const bool check_vs_interpreter = std::getenv("PS2_VU_CHECK") != nullptr;
+            static bool checking = false;
+            if (check_vs_interpreter && !checking && ++sampled % 64 == 0) {
+                // The interpreter is the reference: run the compiled function
+                // and, from the same state, the interpreter, and report the
+                // first registers or memory they disagree on.
+                static std::uint64_t checked = 0, mismatches = 0;
+                static std::uint8_t before_mem[16384], run_mem[16384];
+                const Vu0Regs before = g_vu1;
+                std::memcpy(before_mem, g_vu1_mem, sizeof before_mem);
+                std::int64_t escape = -1;
+                const std::uint64_t key = program_key(g_vu1_code, reachable(g_vu1_code, 16383u, pc & 16383u), pc & 16383u);
+                g_capture = &escape;
+                fn(g_vu1, g_vu1_mem);
+                g_capture = nullptr;
+                const Vu0Regs after = g_vu1;
+                std::memcpy(run_mem, g_vu1_mem, sizeof run_mem);
+                g_vu1 = before;
+                std::memcpy(g_vu1_mem, before_mem, sizeof g_vu1_mem);
+                // The reference is the interpreter loop itself: interpret()
+                // would only queue the entry while a chain is running.
+                checking = true;
+                g_reference_dry = true;
+                run_fast(1, pc);
+                g_reference_dry = false;
+                checking = false;
+                if (escape < 0 && (std::memcmp(&after, &g_vu1, sizeof after) != 0 || std::memcmp(run_mem, g_vu1_mem, sizeof run_mem) != 0)) {
+                    if (++mismatches <= 20) {
+                        int vf = -1;
+                        for (int i = 0; i < 32 && vf < 0; ++i)
+                            if (std::memcmp(&after.vf[i], &g_vu1.vf[i], 16) != 0) vf = i;
+                        int vi = -1;
+                        for (int i = 0; i < 16 && vi < 0; ++i)
+                            if (after.vi[i] != g_vu1.vi[i]) vi = i;
+                        std::uint32_t word = ~0u;
+                        for (int i = 0; i < 16384 && word == ~0u; ++i) word = run_mem[i] ^ g_vu1_mem[i] ? i : ~0u;
+                        std::fprintf(stderr, "[vu-check] key %016llX entry %04X call %llu: vf%d vi%d q/p/i/r %d flags %d mem %d\n", static_cast<unsigned long long>(key),
+                                     pc & 16383u, static_cast<unsigned long long>(checked), vf, vi,
+                                     after.q != g_vu1.q || after.p != g_vu1.p || after.i != g_vu1.i || after.r != g_vu1.r,
+                                     after.mac != g_vu1.mac || after.status != g_vu1.status || after.clip != g_vu1.clip, word == ~0u ? -1 : static_cast<int>(word));
+                    }
+                }
+                ++checked;
+                if (checked == 1 || checked % 100 == 0)
+                    std::fprintf(stderr, "[vu-check-summary] sampled %llu calls, %llu mismatches\n", static_cast<unsigned long long>(checked), static_cast<unsigned long long>(mismatches));
+                g_vu1 = after;
+                std::memcpy(g_vu1_mem, run_mem, sizeof g_vu1_mem);
+                if (escape >= 0) interpret(1, static_cast<std::uint32_t>(escape));
+                return;
+            }
             if (jit && jit != fn && ++sampled % 32 == 0) check_jit(fn, jit);
             else fn(g_vu1, g_vu1_mem);
             return;
@@ -858,16 +943,20 @@ void run_entry(int unit, std::uint32_t pc) {
 
 ProgramFn lookup(std::uint32_t address) {
     EntryCache &e = g_entries[(address & 16383u) >> 3];
+    g_last_key = 0;
     if (e.generation == g_generation[1]) return e.function;
     e.generation = g_generation[1];
     for (const Candidate &c : e.candidates)
         if (candidate_matches(c)) {
             e.function = c.function;
             e.jit = c.jit;
+            e.key = c.key;
             return e.function;
         }
     const std::vector<std::uint32_t> pcs = reachable(g_vu1_code, 16383u, address);
     const std::uint64_t key = program_key(g_vu1_code, pcs, address & 16383u);
+    g_last_key = key;
+    e.key = key;
     const auto it = g_programs.find(key);
     e.function = it == g_programs.end() ? nullptr : it->second;
     e.jit = nullptr;
@@ -875,6 +964,7 @@ ProgramFn lookup(std::uint32_t address) {
     if (jit_mode == 2 || (jit_mode >= 1 && !e.function)) e.function = jit_program(key, address);
     else if (jit_mode == 3) e.jit = jit_program(key, address);
     Candidate c = make_candidate(pcs);
+    c.key = key;
     c.function = e.function;
     c.jit = e.jit;
     if (e.candidates.size() < 8) e.candidates.push_back(std::move(c));
@@ -913,6 +1003,7 @@ void run_fast(int n, std::uint32_t address) {
     static const bool count = std::getenv("PS2_VU_COUNT") != nullptr;
     static const bool record_jumps = std::getenv("PS2_VU_RECORD") != nullptr || static_cast<bool>(g_options.on_vu_program);
     if (count && ++calls % 20000 == 0) std::fprintf(stderr, "[vu1] %llu calls, %llu instructions\n", (unsigned long long)calls, (unsigned long long)total);
+    BranchView view;
     for (std::uint32_t steps = 0; steps < 1'000'000; ++steps, ++total) {
         std::uint32_t lo, hi;
         std::memcpy(&lo, u.code + pc, 4);
@@ -928,6 +1019,9 @@ void run_fast(int n, std::uint32_t address) {
         ++pipe.t;
         read_q(u, pipe, r, current, hi);
         fast_upper(r, d, out);
+        std::uint16_t was[16];
+        view.snapshot(r, was);
+        view.arm(u);
         if (hi & 0x80000000u) {
             r.i = lo;
         } else {
@@ -937,6 +1031,8 @@ void run_fast(int n, std::uint32_t address) {
             if (branch) npc = target;
             if (branch && record_jumps && n == 1 && ((lo >> 25) == 0x24u || (lo >> 25) == 0x25u)) lookup(target);
         }
+        u.branch_vi = nullptr;
+        view.commit(was, lo, !(hi & 0x80000000u));
         if (out.target > 0) {
             Reg128 &dst = out.target == kAcc ? r.acc : r.vf[out.target];
             for (int i = 0; i < 4; ++i)
@@ -977,6 +1073,7 @@ void run(int n, std::uint32_t address) {
     u.pipe = &pipe;
     std::uint32_t pc = address & u.code_mask, npc = (pc + 8u) & u.code_mask;
     bool ending = false;
+    BranchView view;
     for (std::uint32_t steps = 0; steps < 1'000'000; ++steps) {
         std::uint32_t lo, hi;
         std::memcpy(&lo, u.code + pc, 4);
@@ -988,6 +1085,9 @@ void run(int n, std::uint32_t address) {
         read_q(u, pipe, r, current, hi);
         UpperOut out = upper(r, hi);
         bool branch = false;
+        std::uint16_t was[16];
+        view.snapshot(r, was);
+        view.arm(u);
         if (hi & 0x80000000u) {
             r.i = lo;
         } else {
@@ -995,6 +1095,8 @@ void run(int n, std::uint32_t address) {
             lower(u, lo, current, target, branch);
             if (branch) npc = target;
         }
+        u.branch_vi = nullptr;
+        view.commit(was, lo, !(hi & 0x80000000u));
         commit(r, out);
         if (out.target >= 0 && out.flags) pipe.set_mac(r.mac, r.status);
         if (out.has_clip) {

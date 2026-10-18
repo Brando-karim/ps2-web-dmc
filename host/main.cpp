@@ -57,6 +57,11 @@ int main(int argc, char **argv) {
             if (!ps2::parse_press(argv[++i], press)) return usage();
             ps2::g_options.presses.push_back(press);
         }
+        else if (a == "--axis" && i + 1 < argc) {
+            ps2::AxisPress press;
+            if (!ps2::parse_axis(argv[++i], press)) return usage();
+            ps2::g_options.axis_presses.push_back(press);
+        }
 #ifdef PS2_WINDOW
         else if (a == "--window") window = true;
         else if (a == "--fullscreen") window = fullscreen = true;
