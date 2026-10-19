@@ -1,7 +1,11 @@
 # PS2 Web Recomp
 PlayStation 2 games running in the browser through static recompilation. The game's Emotion Engine machine code is translated ahead of time into C++ and compiled to WebAssembly, so the main CPU is never interpreted; the rest of the console, its operating system and hardware, is emulated by a runtime that draws with WebGPU.
 
-<p align="center"> <img src="docs/media/dmc3-demo.webp" alt="Devil May Cry 3 running in a browser" width="720"> <br> <a href="docs/media/dmc3-demo.mp4">Watch the full recording (2:10)</a> </p>
+<p align="center">
+  <img src="https://makeagif.com/gif/devil-may-cry-3-hd-cutscenes-prologue-mission-1-X4eApZ" alt="Devil May Cry 3 running in a browser" width="720">
+  <br>
+  <a href="https://makeagif.com/gif/devil-may-cry-3-hd-cutscenes-prologue-mission-1-X4eApZ">Watch the full recording</a>
+</p>
 This is the sibling of psp-web-recomp and follows the same method. The first title brought up this way is Devil May Cry 3: Special Edition, chosen because it stresses the parts of the machine that are hardest to get right: it runs its combat at a locked 60 frames per second, leans on vector unit 1 for the weapon effects and enemy animation that fill the screen, and swaps whole modules in and out of memory as it moves between menus, cutscenes and gameplay. It plays from boot through the opening movie, the mission menus, the cutscenes and combat, with music and sound effects, and saves to a memory card kept in the browser. Combat holds 60 frames per second at the PS2's native resolution in Chrome on a laptop's integrated GPU, and stays above 50 at twice the resolution, which is how the recording above was made.
 
 God of War II followed through the same scripts. It needed no game-specific code, but it found two bugs that Devil May Cry 3 had never triggered, one in the recompiler and one in the vector unit timing, and a few missing pieces of the PS2's input/output processor. It now plays from the menus through its cutscenes into combat, and holds 60 frames per second in heavy combat at the PS2's resolution in Chrome. At twice the resolution it runs at 48 to 60, limited by the laptop's integrated GPU.
