@@ -5,6 +5,7 @@ import sys
 USAGE = 'usage: pnach.py crc <elf> | pnach.py apply <elf> <patched elf> <runtime list> [--section NAME]... <pnach>...'
 SIZES = {'byte': 1, 'short': 2, 'word': 4, 'double': 8, 'beshort': 2, 'beword': 4, 'bedouble': 8}
 EXTENDED = {0: 1, 1: 2, 2: 4}
+PAD = 16
 
 
 def crc(data):
@@ -18,9 +19,42 @@ def segments(elf):
     phoff, = struct.unpack_from('<I', elf, 28)
     phentsize, phnum = struct.unpack_from('<HH', elf, 42)
     for i in range(phnum):
-        kind, offset, vaddr, _, filesz = struct.unpack_from('<5I', elf, phoff + i * phentsize)
-        if kind == 1 and filesz:
-            yield vaddr & 0x1FFFFFFF, offset, filesz
+        kind, offset, vaddr, _, filesz, memsz = struct.unpack_from('<6I', elf, phoff + i * phentsize)
+        if kind == 1:
+            yield vaddr & 0x1FFFFFFF, offset, filesz, memsz
+
+
+def caves(patches, loads):
+    image = {}
+    for place, address, size, value in patches:
+        if any(vaddr <= address < vaddr + memsz or vaddr < address + size <= vaddr + memsz for vaddr, _, _, memsz in loads):
+            continue
+        for k, byte in enumerate(value.to_bytes(size, 'little')):
+            image[address + k] = byte
+    blocks = []
+    for address in sorted(image):
+        if blocks and address <= blocks[-1][0] + len(blocks[-1][1]) + PAD:
+            start, data = blocks[-1]
+            data.extend(bytes(address - start - len(data)))
+            data.append(image[address])
+        else:
+            blocks.append((address, bytearray([image[address]])))
+    return [(start, bytes(data) + bytes(PAD)) for start, data in blocks]
+
+
+def add_segments(elf, blocks):
+    phoff, = struct.unpack_from('<I', elf, 28)
+    phentsize, phnum = struct.unpack_from('<HH', elf, 42)
+    table = bytearray(elf[phoff:phoff + phentsize * phnum])
+    for address, data in blocks:
+        elf.extend(bytes(-len(elf) % 16))
+        offset = len(elf)
+        elf.extend(data)
+        table += struct.pack('<8I', 1, offset, address, address, len(data), len(data), 7, 16) + bytes(phentsize - 32)
+    elf.extend(bytes(-len(elf) % 4))
+    struct.pack_into('<I', elf, 28, len(elf))
+    struct.pack_into('<H', elf, 44, phnum + len(blocks))
+    elf.extend(table)
 
 
 def parse(path, wanted, sections, skipped):
@@ -89,17 +123,22 @@ def main():
     loads = list(segments(elf))
     in_elf = 0
     for place, address, size, value in patches:
-        for vaddr, offset, filesz in loads:
+        for vaddr, offset, filesz, _ in loads:
             if vaddr <= address and address + size <= vaddr + filesz:
                 at = offset + address - vaddr
                 elf[at:at + size] = value.to_bytes(size, 'little')
                 in_elf += 1
                 break
+    blocks = caves(patches, loads)
+    if blocks:
+        add_segments(elf, blocks)
     open(sys.argv[3], 'wb').write(elf)
     with open(sys.argv[4], 'w') as out:
         for place, address, size, value in patches:
             out.write('%d %08X %d %X\n' % (place, address, size, value))
     print('%d patches, %d of them in the executable' % (len(patches), in_elf))
+    for address, data in blocks:
+        print('new code at %08X..%08X outside the executable joins it as a segment' % (address, address + len(data) - PAD))
     for name, info in sections.items():
         print('%s [%s]%s' % ('applied' if info['used'] else 'left out', name, ', meant for a %s screen' % info['aspect'] if info['aspect'] else ''))
     for name in sorted(wanted - set(sections)):
